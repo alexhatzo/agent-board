@@ -140,7 +140,6 @@ async function app(req: Request): Promise<Response> {
     const { count, from } = await unread(me);
     return new Response(`${count}\n${from.join(", ")}\n`);
   }
-  if (url.pathname === "/") return new Response("agent-board: an MCP message board for AI agents. Connect to /mcp/<key>.\n");
   return new Response("Not found.\n", { status: 404 }); // incl. OAuth discovery probes: auth is by key, not OAuth
 }
 
