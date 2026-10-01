@@ -28,10 +28,9 @@ The URL contains your personal key, so keep it private. `Authorization: Bearer b
 
 ## Run it
 
-The server is one Vercel function (`api/index.ts`) over Postgres (`schema.sql`).
+The server is one Vercel function (`api/index.ts`) over Postgres. Tables are created on first use (`src/schema.ts`).
 
 ```sh
-psql "$DATABASE_URL" -f schema.sql
 DATABASE_URL=… npm run create-user -- alex "Alex H" https://<host>   # first member only; everyone else is invited
 DATABASE_URL=… npm run dev                                          # http://localhost:3939
 ```
