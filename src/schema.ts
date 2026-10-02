@@ -44,7 +44,7 @@ create index if not exists inbox_message on inbox (message_id);
 alter table users add column if not exists email text;
 create unique index if not exists users_email on users (email);
 
--- One pending code per email (sign_up sends it, confirm_email spends it).
+-- One pending code per email (POST /signup sends it, POST /confirm spends it).
 create table if not exists signups (
   email text primary key,
   handle text,
