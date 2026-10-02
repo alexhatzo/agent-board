@@ -1,6 +1,6 @@
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { addFriend, auth, BOARD, BoardError, checkBoard, signup, HANDLE, history, type Me, post, unread } from "../src/board.js";
+import { addFriend, auth, BOARD, BoardError, checkBoard, confirmSignupCode, HANDLE, sendSignupCode, history, type Me, post, unread } from "../src/board.js";
 
 const INSTRUCTIONS =
   "Agent Board: an async message board shared with the user's coworkers and their AI agents (not Slack, Linear or Notion). " +
@@ -10,6 +10,58 @@ const INSTRUCTIONS =
 
 const handle = z.string().trim().toLowerCase().regex(HANDLE, "handles are 2-32 lowercase letters, digits, - or _");
 const board = z.string().trim().toLowerCase().regex(BOARD, "board names are lowercase letters, digits, - or _");
+
+const GUEST_INSTRUCTIONS =
+  "Agent Board: an async message board shared with the user's coworkers and their AI agents. " +
+  "You're connected without an account. When the user wants to join ('sign me up', 'set up the agent board') or lost " +
+  "their link, ask for their email (plus a handle and name if they're new), call sign_up, then ask for the 6-digit " +
+  "code from the email and call confirm_email.";
+
+const email = z.string().trim().toLowerCase().email("that doesn't look like an email address");
+
+/** Keyless connection: all you can do is sign up (or sign back in) with a verified email. */
+function guestServer(origin: string) {
+  const s = new McpServer({ name: "agent-board", version: "1.0.0" }, { instructions: GUEST_INSTRUCTIONS });
+  s.registerTool(
+    "sign_up",
+    {
+      title: "Sign up for the Agent Board",
+      description:
+        "Step 1 of 2. Emails the user a 6-digit code. New user: ask for their email, a handle and their name first; " +
+        "never invent them. Lost their link or setting up another machine: only the email is needed. If the handle " +
+        "is taken, ask for another. Then ask the user for the code and call confirm_email.",
+      inputSchema: z.object({
+        email,
+        handle: handle.optional().describe("New users only. 2-32 lowercase letters, digits, - or _. What coworkers add them by."),
+        name: z.string().trim().min(1).max(80).optional().describe("New users only. Their display name."),
+      }),
+    },
+    async (i) =>
+      run(async () => {
+        const { returning } = await sendSignupCode(i.email, i.handle, i.name);
+        return { sent: true, to: i.email, returning, next: "Ask the user for the 6-digit code in that email, then call confirm_email." };
+      }),
+  );
+  s.registerTool(
+    "confirm_email",
+    {
+      title: "Confirm the Agent Board email code",
+      description:
+        "Step 2 of 2. Works in any session, not only the one that called sign_up: if the user gives you an email and a " +
+        "6-digit Agent Board code, call this. Returns the user's private board URL (it contains their key: don't repeat it in full) and the " +
+        "command that switches this MCP server to it. Run the command for the client you are (in Cursor, set the " +
+        "agent-board url in ~/.cursor/mcp.json), then tell the user to start a new session and say 'check the agent " +
+        "board'. Offer the menubar command on macOS. A returning user gets a new key: links on other machines stop working.",
+      inputSchema: z.object({ email, code: z.string().trim().regex(/^\d{6}$/, "the code is 6 digits") }),
+    },
+    async ({ email, code }) =>
+      run(async () => {
+        const { handle, key, returning } = await confirmSignupCode(email, code);
+        return { handle, returning, url: `${origin}/mcp/${key}`, setup: setupCommands(origin, key) };
+      }),
+  );
+  return s;
+}
 
 function buildServer(me: Me, origin: string) {
   const s = new McpServer({ name: "agent-board", version: "1.0.0" }, { instructions: INSTRUCTIONS });
@@ -117,8 +169,8 @@ const publicOrigin = (url: URL) =>
 export function setupCommands(origin: string, key: string) {
   const url = `${origin}/mcp/${key}`;
   return {
-    claude_code: `claude mcp add --scope user --transport http agent-board ${url}`,
-    codex: `codex mcp add agent-board --url ${url}`,
+    claude_code: `claude mcp remove -s user agent-board 2>/dev/null; claude mcp add --scope user --transport http agent-board ${url}`,
+    codex: `codex mcp remove agent-board 2>/dev/null; codex mcp add agent-board --url ${url}`,
     // Cursor's official install link: opens Cursor and asks to add the server to ~/.cursor/mcp.json.
     cursor: `open 'cursor://anysphere.cursor-deeplink/mcp/install?name=agent-board&config=${encodeURIComponent(btoa(JSON.stringify({ url })))}'`,
     menubar: `curl -fsSL ${origin}/notifier/${key} | sh`,
@@ -126,8 +178,8 @@ export function setupCommands(origin: string, key: string) {
 }
 
 const mcp = createMcpHandler((ctx) => {
-  const { me, origin } = ctx.authInfo!.extra as { me: Me; origin: string };
-  return buildServer(me, origin);
+  const { me, origin } = ctx.authInfo!.extra as { me?: Me; origin: string };
+  return me ? buildServer(me, origin) : guestServer(origin);
 });
 
 async function app(req: Request): Promise<Response> {
@@ -144,19 +196,10 @@ async function route(req: Request): Promise<Response> {
   const key = pathKey || req.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
 
   if (route === "mcp") {
+    if (!key) return mcp.fetch(req, { authInfo: { token: "", clientId: "guest", scopes: [], extra: { origin: publicOrigin(url) } } });
     const me = await auth(key);
     if (!me) return Response.json({ error: "Unknown board key." }, { status: 401 });
     return mcp.fetch(req, { authInfo: { token: key!, clientId: me.handle, scopes: [], extra: { me, origin: publicOrigin(url) } } });
-  }
-  if (route === "signup" && req.method === "POST") {
-    const input = z.object({ handle, name: z.string().trim().min(1).max(80) }).safeParse(await req.json().catch(() => null));
-    if (!input.success) {
-      return Response.json({ error: 'Send {"handle": "...", "name": "..."}. Handles are 2-32 lowercase letters, digits, - or _.' }, { status: 400 });
-    }
-    const user = await signup(input.data.handle, input.data.name).catch((e) => (e instanceof BoardError ? e : Promise.reject(e)));
-    if (user instanceof BoardError) return Response.json({ error: user.message }, { status: 409 });
-    const origin = publicOrigin(url);
-    return Response.json({ handle: input.data.handle, url: `${origin}/mcp/${user.key}`, setup: setupCommands(origin, user.key) });
   }
   if (route === "unread" || route === "notifier") {
     const me = await auth(key);

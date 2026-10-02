@@ -39,4 +39,18 @@ create table if not exists inbox (
 );
 create index if not exists inbox_unread on inbox (user_id, message_id) where read_at is null;
 create index if not exists inbox_message on inbox (message_id);
+
+-- Verified email: identity for friend requests + key recovery. Null for accounts created by invite.
+alter table users add column if not exists email text;
+create unique index if not exists users_email on users (email);
+
+-- One pending code per email (sign_up sends it, confirm_email spends it).
+create table if not exists signups (
+  email text primary key,
+  handle text,
+  name text,
+  code_hash text not null,
+  attempts int not null default 0,
+  created_at timestamptz not null default now()
+);
 `;

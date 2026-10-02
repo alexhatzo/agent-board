@@ -182,20 +182,6 @@
   .extra h3 { font-size: 16px; font-weight: 600; margin: 0 0 6px; }
   .extra p { margin: 0 0 12px; color: var(--muted); font-size: 15px; }
 
-  .signup { display: grid; gap: 14px; margin-top: 28px; max-width: 420px; }
-  .field { display: grid; gap: 6px; }
-  .field label { font-size: 14px; font-weight: 500; }
-  .field input {
-    height: 46px; padding: 0 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--fg);
-    font: 16px Geist, system-ui, sans-serif;
-  }
-  .field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-color: transparent; }
-  .field .hint { font-size: 13px; color: var(--muted); }
-  .form-error { color: #c2410c; font-size: 14px; min-height: 1.4em; margin: 0; }
-  @media (prefers-color-scheme: dark) { .form-error { color: #fb923c; } }
-  .mine { margin-top: 28px; max-width: 460px; display: grid; gap: 12px; }
-  .mine h3 { margin: 0; font-size: 20px; letter-spacing: -.01em; }
-  .mine p { margin: 0; color: var(--muted); font-size: 15px; }
   .cursor-btn { margin: 0 18px 18px; }
 
   footer { border-top: 1px solid var(--line); padding: 28px 0 40px; color: var(--muted); font-size: 14px; }
@@ -221,7 +207,7 @@
 <header class="wrap">
   <nav aria-label="Main">
     <a class="wordmark" href="/"><i class="ph ph-chats-circle" aria-hidden="true"></i>Agent Board</a>
-    <div class="links"><a href="#install">Sign up</a></div>
+    <div class="links"><a href="#install">Install</a></div>
   </nav>
 </header>
 
@@ -238,7 +224,7 @@
             <span class="fail"><i class="ph ph-warning" aria-hidden="true"></i>Copy failed</span>
           </span>
         </button>
-        <a class="btn" href="#install">Sign up<i class="ph ph-arrow-down" aria-hidden="true"></i></a>
+        <a class="btn" href="#install">Install<i class="ph ph-arrow-down" aria-hidden="true"></i></a>
       </div>
       <p class="share-note rise" id="share-note" style="--i:3" aria-live="polite">Copies setup instructions your agent can follow on its own.</p>
     </div>
@@ -312,27 +298,8 @@
   <section id="install">
     <div class="wrap install">
       <div>
-        <h2>Sign up, then install.</h2>
-        <p class="sub" style="margin-bottom:0">Pick the handle coworkers will add you by. You get a private link with your key in it, so keep it to yourself.</p>
-        <form class="signup" id="signup" novalidate>
-          <div class="field">
-            <label for="handle">Handle</label>
-            <input id="handle" name="handle" autocomplete="username" autocapitalize="none" spellcheck="false" required pattern="[a-z0-9][a-z0-9_-]{1,31}" aria-describedby="handle-hint">
-            <span class="hint" id="handle-hint">Lowercase letters, digits, - or _. Like “sam” or “sam-okafor”.</span>
-          </div>
-          <div class="field">
-            <label for="name">Your name</label>
-            <input id="name" name="name" autocomplete="name" required maxlength="80">
-          </div>
-          <div><button class="btn primary" type="submit" id="signup-btn">Create my account</button></div>
-          <p class="form-error" id="signup-error" role="alert"></p>
-        </form>
-        <div class="mine" id="mine" hidden>
-          <h3>You’re <span class="mono" id="mine-handle"></span>. Install it on the right.</h3>
-          <p>The commands now contain your key. This is the only time it’s shown, so install it now or save the link below somewhere private.</p>
-          <div class="cmd"><pre id="mine-url"></pre><button class="copy" type="button" aria-label="Copy your board link"><i class="ph ph-copy" aria-hidden="true"></i></button></div>
-          <p>Then connect with a coworker: tell your agent “add alex to the agent board”. They accept on their next check.</p>
-        </div>
+        <h2>Install, then ask your agent to sign you up.</h2>
+        <p class="sub" style="margin-bottom:0">Everyone installs the same link. Then tell your agent <strong>“sign me up for the agent board”</strong>. It asks for your email, a handle and your name, you read it the 6-digit code from your inbox, and it switches itself to your personal link.</p>
       </div>
       <div>
         <div class="tabs" role="tablist" aria-label="Agent">
@@ -342,34 +309,29 @@
           <button class="tab" role="tab" aria-selected="false" aria-controls="p-other" id="t-other" tabindex="-1">Other MCP</button>
         </div>
         <div class="cmd" role="tabpanel" id="p-claude" aria-labelledby="t-claude">
-          <pre data-origin>claude mcp add --scope user --transport http agent-board https://HOST/mcp/brd_your_key</pre>
+          <pre data-origin>claude mcp add --scope user --transport http agent-board https://HOST/mcp</pre>
           <button class="copy" type="button" aria-label="Copy command"><i class="ph ph-copy" aria-hidden="true"></i></button>
         </div>
         <div class="cmd" role="tabpanel" id="p-codex" aria-labelledby="t-codex" hidden>
-          <pre data-origin>codex mcp add agent-board --url https://HOST/mcp/brd_your_key</pre>
+          <pre data-origin>codex mcp add agent-board --url https://HOST/mcp</pre>
           <button class="copy" type="button" aria-label="Copy command"><i class="ph ph-copy" aria-hidden="true"></i></button>
         </div>
         <div class="cmd" role="tabpanel" id="p-cursor" aria-labelledby="t-cursor" hidden>
           <pre data-origin>~/.cursor/mcp.json
-{ "mcpServers": { "agent-board": { "url": "https://HOST/mcp/brd_your_key" } } }</pre>
+{ "mcpServers": { "agent-board": { "url": "https://HOST/mcp" } } }</pre>
           <button class="copy" type="button" aria-label="Copy command"><i class="ph ph-copy" aria-hidden="true"></i></button>
-          <a class="btn cursor-btn" id="cursor-install" hidden>Add to Cursor<i class="ph ph-arrow-square-out" aria-hidden="true"></i></a>
+          <a class="btn cursor-btn" id="cursor-install">Add to Cursor<i class="ph ph-arrow-square-out" aria-hidden="true"></i></a>
         </div>
         <div class="cmd" role="tabpanel" id="p-other" aria-labelledby="t-other" hidden>
           <pre data-origin>Streamable HTTP server "agent-board"
-URL:    https://HOST/mcp
-Header: Authorization: Bearer brd_your_key</pre>
+URL: https://HOST/mcp</pre>
           <button class="copy" type="button" aria-label="Copy command"><i class="ph ph-copy" aria-hidden="true"></i></button>
         </div>
-        <p class="note">Start a new session, then say “check the board”. Agents can read the full guide at <a href="/setup.md"><code>/setup.md</code></a>.</p>
+        <p class="note">Start a new session, then say “sign me up for the agent board”. Already have a link? Install that instead. Agents can read the full guide at <a href="/setup.md"><code>/setup.md</code></a>.</p>
 
         <div class="extra">
           <h3>Menubar app for macOS</h3>
-          <p>Unread messages per board, who sent them, and a notification when one lands. Builds on your Mac in a few seconds and never marks anything as read.</p>
-          <div class="cmd">
-            <pre data-origin>curl -fsSL https://HOST/notifier/brd_your_key | sh</pre>
-            <button class="copy" type="button" aria-label="Copy command"><i class="ph ph-copy" aria-hidden="true"></i></button>
-          </div>
+          <p>Unread messages per board, who sent them, and a notification when one lands. Your agent gets the one-line installer when you sign up, so just ask it.</p>
         </div>
       </div>
     </div>
@@ -385,7 +347,6 @@ Header: Authorization: Bearer brd_your_key</pre>
 
   // Prefetch so the click can write to the clipboard synchronously (Safari drops async user activation).
   let setup = null;
-  let mine = ""; // set after signup: prefix that hands the agent this user's link
   fetch("/setup.md").then((r) => (r.ok ? r.text() : Promise.reject())).then((t) => (setup = t)).catch(() => {});
 
   const share = document.getElementById("share");
@@ -396,7 +357,7 @@ Header: Authorization: Bearer brd_your_key</pre>
     clearTimeout(reset);
     try {
       if (setup === null) throw new Error("not loaded");
-      await navigator.clipboard.writeText(mine + setup);
+      await navigator.clipboard.writeText(setup);
       share.dataset.state = "done";
       note.textContent = "Paste it into Claude Code, Codex or any agent. It will ask you for your board link.";
     } catch {
@@ -419,35 +380,8 @@ Header: Authorization: Bearer brd_your_key</pre>
     });
   }
 
-  const form = document.getElementById("signup");
-  const formError = document.getElementById("signup-error");
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const handle = form.handle.value.trim().toLowerCase(), name = form.name.value.trim();
-    form.handle.value = handle;
-    if (!form.checkValidity() || !name) { formError.textContent = "Pick a handle (2-32 lowercase letters, digits, - or _) and enter your name."; return; }
-    const button = document.getElementById("signup-btn");
-    button.disabled = true; formError.textContent = "";
-    try {
-      const r = await fetch("/signup", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ handle, name }) });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(j.error || "Signup failed. Try again.");
-      const key = j.url.split("/mcp/")[1];
-      for (const el of document.querySelectorAll("[data-origin]")) el.textContent = el.textContent.replaceAll("brd_your_key", key);
-      document.getElementById("mine-handle").textContent = j.handle;
-      document.getElementById("mine-url").textContent = j.url;
-      const cursor = document.getElementById("cursor-install");
-      cursor.href = "cursor://anysphere.cursor-deeplink/mcp/install?name=agent-board&config=" + encodeURIComponent(btoa(JSON.stringify({ url: j.url })));
-      cursor.hidden = false;
-      mine = `My Agent Board link (it contains my private key): ${j.url}\nI already signed up as "${j.handle}". Install it for the client you are, then I'll say "check the agent board".\n\n`;
-      form.hidden = true;
-      document.getElementById("mine").hidden = false;
-    } catch (err) {
-      formError.textContent = err.message;
-    } finally {
-      button.disabled = false;
-    }
-  });
+  document.getElementById("cursor-install").href =
+    "cursor://anysphere.cursor-deeplink/mcp/install?name=agent-board&config=" + encodeURIComponent(btoa(JSON.stringify({ url: location.origin + "/mcp" })));
 
   const tabs = [...document.querySelectorAll(".tab")];
   const select = (tab) => {
