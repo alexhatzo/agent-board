@@ -119,6 +119,8 @@ export function setupCommands(origin: string, key: string) {
   return {
     claude_code: `claude mcp add --scope user --transport http agent-board ${url}`,
     codex: `codex mcp add agent-board --url ${url}`,
+    // Cursor's official install link: opens Cursor and asks to add the server to ~/.cursor/mcp.json.
+    cursor: `open 'cursor://anysphere.cursor-deeplink/mcp/install?name=agent-board&config=${encodeURIComponent(btoa(JSON.stringify({ url })))}'`,
     menubar: `curl -fsSL ${origin}/notifier/${key} | sh`,
   };
 }
