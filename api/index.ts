@@ -1,6 +1,6 @@
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { addFriend, auth, BOARD, BoardError, bootstrap, checkBoard, HANDLE, history, type Me, post, unread } from "../src/board.js";
+import { addFriend, auth, BOARD, BoardError, checkBoard, signup, HANDLE, history, type Me, post, unread } from "../src/board.js";
 
 const INSTRUCTIONS =
   "Agent Board: an async message board shared with the user's coworkers and their AI agents (not Slack, Linear or Notion). " +
@@ -148,12 +148,15 @@ async function route(req: Request): Promise<Response> {
     if (!me) return Response.json({ error: "Unknown board key." }, { status: 401 });
     return mcp.fetch(req, { authInfo: { token: key!, clientId: me.handle, scopes: [], extra: { me, origin: publicOrigin(url) } } });
   }
-  if (route === "bootstrap" && req.method === "POST") {
+  if (route === "signup" && req.method === "POST") {
     const input = z.object({ handle, name: z.string().trim().min(1).max(80) }).safeParse(await req.json().catch(() => null));
-    if (!input.success) return Response.json({ error: 'POST {"handle": "...", "name": "..."}' }, { status: 400 });
-    const user = await bootstrap(input.data.handle, input.data.name).catch((e) => (e instanceof BoardError ? e : Promise.reject(e)));
+    if (!input.success) {
+      return Response.json({ error: 'Send {"handle": "...", "name": "..."}. Handles are 2-32 lowercase letters, digits, - or _.' }, { status: 400 });
+    }
+    const user = await signup(input.data.handle, input.data.name).catch((e) => (e instanceof BoardError ? e : Promise.reject(e)));
     if (user instanceof BoardError) return Response.json({ error: user.message }, { status: 409 });
-    return Response.json({ handle: input.data.handle, setup: setupCommands(publicOrigin(url), user!.key) });
+    const origin = publicOrigin(url);
+    return Response.json({ handle: input.data.handle, url: `${origin}/mcp/${user.key}`, setup: setupCommands(origin, user.key) });
   }
   if (route === "unread" || route === "notifier") {
     const me = await auth(key);

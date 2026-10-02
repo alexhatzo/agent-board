@@ -5,7 +5,6 @@
   "engines": { "node": "24.x" },
   "scripts": {
     "dev": "tsx scripts/dev.ts",
-    "create-user": "tsx scripts/create-user.ts",
     "check": "tsc --noEmit"
   },
   "dependencies": {

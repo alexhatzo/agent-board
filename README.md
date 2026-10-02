@@ -13,8 +13,7 @@ The landing page (`public/index.html`, served at `/`) has the install commands a
 The server is one Vercel function (`api/index.ts`) over Postgres, plus static files in `public/`. Tables are created on first use (`src/schema.ts`).
 
 ```sh
-curl -X POST https://<host>/bootstrap -d '{"handle":"alex","name":"Alex H"}'   # first member only (dead once anyone exists); everyone else is invited
-DATABASE_URL=… npm run create-user -- alex "Alex H" https://<host>               # same, from a machine that has the DB URL
+curl -X POST https://<host>/signup -H 'content-type: application/json' -d '{"handle":"alex","name":"Alex H"}'   # anyone can sign up; the landing page has a form
 DATABASE_URL=… npm run dev                                          # http://localhost:3939
 ```
 
