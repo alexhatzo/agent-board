@@ -24,7 +24,8 @@ export const BOARD = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 export const NAME = /^\p{L}[\p{L}\p{M} .'-]{0,59}$/u;
 const PAGE = 50;
 
-export type Me = { id: number; handle: string; name: string };
+/** keyHash: the key this request authenticated with (sign_out_everywhere keeps it). */
+export type Me = { id: number; handle: string; name: string; keyHash: string };
 export type Msg = {
   id: number;
   thread: number;
@@ -56,20 +57,48 @@ const hash = (key: string) => createHash("sha256").update(key).digest("hex");
 export async function auth(key: string | undefined): Promise<Me | undefined> {
   if (!key) return undefined;
   await migrate();
-  const [me] = await sql<Me[]>`select id, handle, name from users where token_hash = ${hash(key)}`;
-  return me;
+  const keyHash = hash(key);
+  const [me] = await sql<Omit<Me, "keyHash">[]>`
+    select u.id, u.handle, u.name from keys k join users u on u.id = k.user_id where k.token_hash = ${keyHash}`;
+  if (!me) return undefined;
+  await sql`update keys set last_used_at = now() where token_hash = ${keyHash}
+    and (last_used_at is null or last_used_at < now() - interval '1 hour')`; // at most one write per key per hour
+  return { ...me, keyHash };
 }
 
 /** Returns the new user's key; the only time it exists outside their client config. */
 const newKey = () => `brd_${randomBytes(24).toString("base64url")}`;
 
-export async function createUser(q: Sql, handle: string, name: string, email: string) {
-  const key = newKey();
+export async function createUser(q: Sql, handle: string, name: string, email: string, label?: string) {
   const [user] = await q<{ id: number }[]>`
-    insert into users (handle, name, token_hash, invited_by, email)
-    values (${handle}, ${name}, ${hash(key)}, null, ${email})
+    insert into users (handle, name, email) values (${handle}, ${name}, ${email})
     on conflict (handle) do nothing returning id`;
-  return user && { id: user.id, key };
+  return user && { id: user.id, key: await addKey(q, user.id, label) };
+}
+
+async function addKey(q: Sql, userId: number, label?: string) {
+  const key = newKey();
+  await q`insert into keys (token_hash, user_id, label) values (${hash(key)}, ${userId}, ${label ?? null})`;
+  return key;
+}
+
+/** Where this person is signed in. Never exposes key material. */
+export async function listKeys(me: Me) {
+  const rows = await sql<{ label: string | null; created_at: Date; last_used_at: Date | null; current: boolean }[]>`
+    select label, created_at, last_used_at, token_hash = ${me.keyHash} as current
+    from keys where user_id = ${me.id} order by created_at`;
+  return rows.map((k) => ({
+    client: k.label ?? "unnamed",
+    signedIn: k.created_at.toISOString(),
+    lastUsed: k.last_used_at?.toISOString() ?? null,
+    ...(k.current ? { thisOne: true } : {}),
+  }));
+}
+
+/** Revoke every key except the one making this call (a link leaked, or an old machine). */
+export async function signOutEverywhere(me: Me) {
+  const removed = await sql`delete from keys where user_id = ${me.id} and token_hash <> ${me.keyHash}`;
+  return { signedOut: removed.count, stillSignedIn: "this client" };
 }
 
 const CODE_TTL = "15 minutes";
@@ -103,8 +132,8 @@ export async function sendSignupCode(rawEmail: string, handle?: string, name?: s
   return { email, returning: Boolean(existing) };
 }
 
-/** Step 2: spend the code. New email → create the account. Known email → issue a fresh key (old links stop working). */
-export async function confirmSignupCode(rawEmail: string, code: string) {
+/** Step 2: spend the code. New email → create the account. Known email → add a key for this client (others keep working). */
+export async function confirmSignupCode(rawEmail: string, code: string, label?: string) {
   await migrate();
   const email = rawEmail.trim().toLowerCase();
   const [pending] = await sql<{ handle: string | null; name: string | null; code_hash: string; attempts: number; expired: boolean }[]>`
@@ -117,10 +146,9 @@ export async function confirmSignupCode(rawEmail: string, code: string) {
   }
   return sql.begin(async (q) => {
     await q`delete from signups where email = ${email}`;
-    const key = newKey();
-    const [returning] = await q<{ handle: string }[]>`update users set token_hash = ${hash(key)} where email = ${email} returning handle`;
-    if (returning) return { handle: returning.handle, key, returning: true };
-    const user = await createUser(q, pending.handle!, pending.name!, email);
+    const [returning] = await q<{ id: number; handle: string }[]>`select id, handle from users where email = ${email}`;
+    if (returning) return { handle: returning.handle, key: await addKey(q, returning.id, label), returning: true };
+    const user = await createUser(q, pending.handle!, pending.name!, email, label);
     if (!user) throw new BoardError(`The handle '${pending.handle}' was taken in the meantime. Call sign_up again with another handle.`);
     return { handle: pending.handle!, key: user.key, returning: false };
   });
