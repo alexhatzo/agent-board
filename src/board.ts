@@ -20,6 +20,8 @@ export const migrate = () => {
 
 export const HANDLE = /^[a-z0-9][a-z0-9_-]{1,31}$/;
 export const BOARD = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+/** Display names reach other people's agents (friend requests) before anyone accepts, so: letters, spaces, . ' - only. */
+export const NAME = /^\p{L}[\p{L}\p{M} .'-]{0,59}$/u;
 const PAGE = 50;
 
 export type Me = { id: number; handle: string; name: string };
@@ -44,9 +46,7 @@ export type Board = {
 };
 export type History = { messages: Msg[]; more: boolean; before?: number };
 export type Sent = { id: number; thread: number; board: string; to: string[] };
-export type FriendResult =
-  | (Person & { status: "friends" | "requested" })
-  | (Person & { status: "invited"; key: string });
+export type FriendResult = Person & { status: "friends" | "requested" };
 
 /** Its message is shown to the agent verbatim, so it should say what to do next. */
 export class BoardError extends Error {}
@@ -63,11 +63,11 @@ export async function auth(key: string | undefined): Promise<Me | undefined> {
 /** Returns the new user's key; the only time it exists outside their client config. */
 const newKey = () => `brd_${randomBytes(24).toString("base64url")}`;
 
-export async function createUser(q: Sql, handle: string, name: string, opts: { invitedBy?: number; email?: string } = {}) {
+export async function createUser(q: Sql, handle: string, name: string, email: string) {
   const key = newKey();
   const [user] = await q<{ id: number }[]>`
     insert into users (handle, name, token_hash, invited_by, email)
-    values (${handle}, ${name}, ${hash(key)}, ${opts.invitedBy ?? null}, ${opts.email ?? null})
+    values (${handle}, ${name}, ${hash(key)}, null, ${email})
     on conflict (handle) do nothing returning id`;
   return user && { id: user.id, key };
 }
@@ -88,10 +88,15 @@ export async function sendSignupCode(rawEmail: string, handle?: string, name?: s
   const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
   const [fresh] = await sql`
     insert into signups (email, handle, name, code_hash) values (${email}, ${handle ?? null}, ${name ?? null}, ${hash(`${email}:${code}`)})
-    on conflict (email) do update set handle = excluded.handle, name = excluded.name, code_hash = excluded.code_hash, attempts = 0, created_at = now()
+    on conflict (email) do update set handle = excluded.handle, name = excluded.name, code_hash = excluded.code_hash, attempts = 0, created_at = now(),
+      sends = case when signups.window_start < now() - interval '1 day' then 1 else signups.sends + 1 end,
+      window_start = case when signups.window_start < now() - interval '1 day' then now() else signups.window_start end
       where signups.created_at < now() - interval '60 seconds'
+        and (signups.window_start < now() - interval '1 day' or signups.sends < 5)
     returning email`;
-  if (!fresh) throw new BoardError("A code was sent to that address less than a minute ago. Ask the user to check their inbox and spam folder.");
+  if (!fresh) {
+    throw new BoardError("A code was sent to that address very recently (max one a minute, five a day). Ask the user to check their inbox and spam folder.");
+  }
   await sendEmail(email, `${code} is your Agent Board code`,
     `Your Agent Board code is ${code}\n\nGive it to your AI agent to finish ${existing ? `signing back in as "${existing.handle}"` : `creating "${handle}"`}. ` +
     `It expires in 15 minutes. If you didn't ask for this, you can ignore this email.`);
@@ -115,7 +120,7 @@ export async function confirmSignupCode(rawEmail: string, code: string) {
     const key = newKey();
     const [returning] = await q<{ handle: string }[]>`update users set token_hash = ${hash(key)} where email = ${email} returning handle`;
     if (returning) return { handle: returning.handle, key, returning: true };
-    const user = await createUser(q, pending.handle!, pending.name!, { email });
+    const user = await createUser(q, pending.handle!, pending.name!, email);
     if (!user) throw new BoardError(`The handle '${pending.handle}' was taken in the meantime. Call sign_up again with another handle.`);
     return { handle: pending.handle!, key: user.key, returning: false };
   });
@@ -213,10 +218,13 @@ export async function post(
       if (!parent) throw new BoardError(`No message #${i.reply_to} that you can see. Use history to find the right id.`);
       thread = parent.thread;
       board = parent.board;
+      // Reply-all, but only to people you're still friends with (remove_friend cuts off old threads too).
       recipients = await q`
-        select id, handle from users where id <> ${me.id}
-          and (id = ${parent.from_id} or id in (select user_id from inbox where message_id = ${parent.id}))`;
-      if (!recipients.length) throw new BoardError("Nobody else is in that conversation. Start a new one with `to`.");
+        select u.id, u.handle from users u where u.id <> ${me.id}
+          and (u.id = ${parent.from_id} or u.id in (select user_id from inbox where message_id = ${parent.id}))
+          and exists (select 1 from friends where a = ${me.id} and b = u.id)
+          and exists (select 1 from friends where a = u.id and b = ${me.id})`;
+      if (!recipients.length) throw new BoardError("Nobody you're still friends with is in that conversation.");
     } else {
       const handles = [...new Set(i.to)];
       if (handles.includes(me.handle)) throw new BoardError("You can't message yourself.");
@@ -250,27 +258,26 @@ export async function post(
 }
 
 /** Existing user: send (or accept) a friend request. New handle + name: invite, friends at once. Idempotent. */
-export async function addFriend(me: Me, handle: string, name?: string): Promise<FriendResult> {
+/** Send (or accept) a friend request. Idempotent. Unknown handles must sign up themselves: the server never mints keys for third parties. */
+export async function addFriend(me: Me, handle: string): Promise<FriendResult> {
   if (handle === me.handle) throw new BoardError("That's you.");
   const [user] = await sql<(Person & { id: number })[]>`select id, handle, name from users where handle = ${handle}`;
-  if (user) {
-    await sql`insert into friends (a, b) values (${me.id}, ${user.id}) on conflict do nothing`;
-    const [{ mutual }] = await sql<{ mutual: boolean }[]>`
-      select exists (select 1 from friends where a = ${user.id} and b = ${me.id}) as mutual`;
-    return { handle: user.handle, name: user.name, status: mutual ? "friends" : "requested" };
-  }
-  if (!name) {
+  if (!user) {
     throw new BoardError(
-      `No one called '${handle}' is on the board. To invite them, call add_friend again with their display name as \`name\`; you'll get a setup command for the user to send them.`,
+      `No one called '${handle}' is on the board yet. They sign up themselves: install the agent board and tell their agent "sign me up for the agent board". Then add them.`,
     );
   }
-  const created = await sql.begin(async (q) => {
-    const user = await createUser(q, handle, name, { invitedBy: me.id });
-    if (user) await q`insert into friends (a, b) values (${me.id}, ${user.id}), (${user.id}, ${me.id})`;
-    return user;
-  });
-  if (!created) return addFriend(me, handle); // a concurrent invite claimed the handle first
-  return { handle, name, status: "invited", key: created.key };
+  await sql`insert into friends (a, b) values (${me.id}, ${user.id}) on conflict do nothing`;
+  const [{ mutual }] = await sql<{ mutual: boolean }[]>`
+    select exists (select 1 from friends where a = ${user.id} and b = ${me.id}) as mutual`;
+  return { handle: user.handle, name: user.name, status: mutual ? "friends" : "requested" };
+}
+
+/** Unfriend, cancel a request, or decline one: drops both directions. They can no longer message you, replies included. Idempotent. */
+export async function removeFriend(me: Me, handle: string) {
+  const user = await userByHandle(handle);
+  await sql`delete from friends where (a = ${me.id} and b = ${user.id}) or (a = ${user.id} and b = ${me.id})`;
+  return { handle, status: "removed" as const };
 }
 
 /** For the menubar notifier. Never claims anything. */
