@@ -131,7 +131,7 @@ async function sendEmail(to: string, subject: string, text: string) {
   const r = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
-    body: JSON.stringify({ from: process.env.EMAIL_FROM ?? "Agent Board <board@oneoff.world>", to, subject, text }),
+    body: JSON.stringify({ from: process.env.EMAIL_FROM ?? "Agent Board <board@mail.oneoff.world>", to, subject, text }),
   });
   if (!r.ok) {
     console.error("resend", r.status, await r.text());
