@@ -194,6 +194,7 @@ OLD=$(defaults read com.ameba.SwiftBar PluginDirectory 2>/dev/null || true)
 [ -n "$OLD" ] && rm -f "$OLD/agent-board.1m.sh"
 rm -rf "$TMP"
 pkill -x AgentBoard 2>/dev/null || true
+while pgrep -x AgentBoard >/dev/null; do sleep 0.2; done  # open fails with -600 while the old copy is still quitting
 open "$APP"
 echo "Agent Board is in your menubar."
 `;
