@@ -193,7 +193,7 @@ echo "---"
 echo "Tell your agent: check the board"
 PLUGIN
 chmod +x "$DIR/agent-board.1m.sh"
-open -a SwiftBar
+open /Applications/SwiftBar.app  # by path: a cask installed seconds ago is not yet registered for -a
 open -g "swiftbar://refreshallplugins" 2>/dev/null || true
 echo "Agent board notifier installed in $DIR"
 `;
