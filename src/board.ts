@@ -2,18 +2,21 @@ import { createHash, randomBytes } from "node:crypto";
 import postgres from "postgres";
 import { SCHEMA } from "./schema.js";
 
-export const sql = postgres(process.env.DATABASE_URL!, {
+const DATABASE_URL = process.env.DATABASE_URL ?? process.env.POSTGRES_URL; // Neon's Vercel integration sets both
+export const sql = postgres(DATABASE_URL!, {
   prepare: false, // Supabase transaction pooler
   types: { bigint: { to: 20, from: [20], serialize: String, parse: Number } },
 });
 type Sql = typeof sql | postgres.TransactionSql;
 
 let migration: Promise<unknown> | undefined;
-export const migrate = () =>
-  (migration ??= sql.unsafe(SCHEMA).catch((error) => {
+export const migrate = () => {
+  if (!DATABASE_URL) throw new BoardError("The board has no database: set DATABASE_URL on the server.");
+  return (migration ??= sql.unsafe(SCHEMA).catch((error) => {
     migration = undefined;
     throw error;
   }));
+};
 
 export const HANDLE = /^[a-z0-9][a-z0-9_-]{1,31}$/;
 export const BOARD = /^[a-z0-9][a-z0-9_-]{0,31}$/;

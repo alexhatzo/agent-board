@@ -124,6 +124,14 @@ const mcp = createMcpHandler((ctx) => {
 });
 
 async function app(req: Request): Promise<Response> {
+  return route(req).catch((error) => {
+    console.error(error);
+    const message = error instanceof BoardError ? error.message : "Server error. Check the function logs.";
+    return Response.json({ error: message }, { status: 500 });
+  });
+}
+
+async function route(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const [, route, pathKey] = url.pathname.split("/");
   const key = pathKey || req.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
