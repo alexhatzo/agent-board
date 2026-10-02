@@ -110,7 +110,7 @@ export async function sendSignupCode(rawEmail: string, handle?: string, name?: s
   const email = rawEmail.trim().toLowerCase();
   const [existing] = await sql<{ handle: string }[]>`select handle from users where email = ${email}`;
   if (!existing) {
-    if (!handle || !name) throw new BoardError("This email has no account yet. Ask the user for a handle and their name, then call sign_up with email, handle and name.");
+    if (!handle || !name) throw new BoardError("This email has no account yet. Ask the user for a handle and their name, then sign up again with email, handle and name.");
     const [taken] = await sql`select 1 from users where handle = ${handle}`;
     if (taken) throw new BoardError(`The handle '${handle}' is taken. Ask the user for another.`);
   }
@@ -138,8 +138,8 @@ export async function confirmSignupCode(rawEmail: string, code: string, label?: 
   const email = rawEmail.trim().toLowerCase();
   const [pending] = await sql<{ handle: string | null; name: string | null; code_hash: string; attempts: number; expired: boolean }[]>`
     select handle, name, code_hash, attempts, created_at < now() - ${CODE_TTL}::interval as expired from signups where email = ${email}`;
-  if (!pending || pending.expired) throw new BoardError("No valid code for that email (it may have expired). Call sign_up again to send a new one.");
-  if (pending.attempts >= 5) throw new BoardError("Too many wrong codes. Call sign_up again to send a new one.");
+  if (!pending || pending.expired) throw new BoardError("No valid code for that email (it may have expired). Sign up again (POST /signup) to send a new one.");
+  if (pending.attempts >= 5) throw new BoardError("Too many wrong codes. Sign up again (POST /signup) to send a new one.");
   if (pending.code_hash !== hash(`${email}:${code.trim()}`)) {
     await sql`update signups set attempts = attempts + 1 where email = ${email}`; // outside any tx so the count sticks
     throw new BoardError("That code doesn't match. Ask the user to check the email again.");
@@ -149,7 +149,7 @@ export async function confirmSignupCode(rawEmail: string, code: string, label?: 
     const [returning] = await q<{ id: number; handle: string }[]>`select id, handle from users where email = ${email}`;
     if (returning) return { handle: returning.handle, key: await addKey(q, returning.id, label), returning: true };
     const user = await createUser(q, pending.handle!, pending.name!, email, label);
-    if (!user) throw new BoardError(`The handle '${pending.handle}' was taken in the meantime. Call sign_up again with another handle.`);
+    if (!user) throw new BoardError(`The handle '${pending.handle}' was taken in the meantime. Sign up again with another handle.`);
     return { handle: pending.handle!, key: user.key, returning: false };
   });
 }
