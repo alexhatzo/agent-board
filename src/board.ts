@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomInt } from "node:crypto";
 import postgres from "postgres";
 import { SCHEMA } from "./schema.js";
 
@@ -33,7 +33,7 @@ export type Msg = {
   body: string;
   inReplyTo?: { id: number; from: string; excerpt: string };
 };
-export type Person = { handle: string; name: string };
+export type Person = { handle: string; name: string; email?: string };
 export type Board = {
   you: string;
   friends: Person[];
@@ -61,25 +61,84 @@ export async function auth(key: string | undefined): Promise<Me | undefined> {
 }
 
 /** Returns the new user's key; the only time it exists outside their client config. */
-export async function createUser(q: Sql, handle: string, name: string, invitedBy?: number) {
-  const key = `brd_${randomBytes(24).toString("base64url")}`;
+const newKey = () => `brd_${randomBytes(24).toString("base64url")}`;
+
+export async function createUser(q: Sql, handle: string, name: string, opts: { invitedBy?: number; email?: string } = {}) {
+  const key = newKey();
   const [user] = await q<{ id: number }[]>`
-    insert into users (handle, name, token_hash, invited_by)
-    values (${handle}, ${name}, ${hash(key)}, ${invitedBy ?? null})
+    insert into users (handle, name, token_hash, invited_by, email)
+    values (${handle}, ${name}, ${hash(key)}, ${opts.invitedBy ?? null}, ${opts.email ?? null})
     on conflict (handle) do nothing returning id`;
   return user && { id: user.id, key };
 }
 
-/** First member of a fresh board, for deployments where nobody can read DATABASE_URL. Dead once anyone exists. */
-export async function bootstrap(handle: string, name: string) {
+const CODE_TTL = "15 minutes";
+
+/** Step 1 of signing up (or back in): email a 6-digit code. A known email means "lost my key": handle/name aren't needed.
+ *  ponytail: per-email 60s cooldown only; add a per-IP cap if someone uses this to spam addresses. */
+export async function sendSignupCode(rawEmail: string, handle?: string, name?: string) {
   await migrate();
+  const email = rawEmail.trim().toLowerCase();
+  const [existing] = await sql<{ handle: string }[]>`select handle from users where email = ${email}`;
+  if (!existing) {
+    if (!handle || !name) throw new BoardError("This email has no account yet. Ask the user for a handle and their name, then call sign_up with email, handle and name.");
+    const [taken] = await sql`select 1 from users where handle = ${handle}`;
+    if (taken) throw new BoardError(`The handle '${handle}' is taken. Ask the user for another.`);
+  }
+  const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
+  const [fresh] = await sql`
+    insert into signups (email, handle, name, code_hash) values (${email}, ${handle ?? null}, ${name ?? null}, ${hash(`${email}:${code}`)})
+    on conflict (email) do update set handle = excluded.handle, name = excluded.name, code_hash = excluded.code_hash, attempts = 0, created_at = now()
+      where signups.created_at < now() - interval '60 seconds'
+    returning email`;
+  if (!fresh) throw new BoardError("A code was sent to that address less than a minute ago. Ask the user to check their inbox and spam folder.");
+  await sendEmail(email, `${code} is your Agent Board code`,
+    `Your Agent Board code is ${code}\n\nGive it to your AI agent to finish ${existing ? `signing back in as "${existing.handle}"` : `creating "${handle}"`}. ` +
+    `It expires in 15 minutes. If you didn't ask for this, you can ignore this email.`);
+  return { email, returning: Boolean(existing) };
+}
+
+/** Step 2: spend the code. New email → create the account. Known email → issue a fresh key (old links stop working). */
+export async function confirmSignupCode(rawEmail: string, code: string) {
+  await migrate();
+  const email = rawEmail.trim().toLowerCase();
+  const [pending] = await sql<{ handle: string | null; name: string | null; code_hash: string; attempts: number; expired: boolean }[]>`
+    select handle, name, code_hash, attempts, created_at < now() - ${CODE_TTL}::interval as expired from signups where email = ${email}`;
+  if (!pending || pending.expired) throw new BoardError("No valid code for that email (it may have expired). Call sign_up again to send a new one.");
+  if (pending.attempts >= 5) throw new BoardError("Too many wrong codes. Call sign_up again to send a new one.");
+  if (pending.code_hash !== hash(`${email}:${code.trim()}`)) {
+    await sql`update signups set attempts = attempts + 1 where email = ${email}`; // outside any tx so the count sticks
+    throw new BoardError("That code doesn't match. Ask the user to check the email again.");
+  }
   return sql.begin(async (q) => {
-    await q`select pg_advisory_xact_lock(1349)`; // serialize concurrent first-member claims
-    const [{ n }] = await q<{ n: number }[]>`select count(*)::int as n from users`;
-    if (n > 0) throw new BoardError("This board already has members. Ask one of them to invite you.");
-    return createUser(q, handle, name);
+    await q`delete from signups where email = ${email}`;
+    const key = newKey();
+    const [returning] = await q<{ handle: string }[]>`update users set token_hash = ${hash(key)} where email = ${email} returning handle`;
+    if (returning) return { handle: returning.handle, key, returning: true };
+    const user = await createUser(q, pending.handle!, pending.name!, { email });
+    if (!user) throw new BoardError(`The handle '${pending.handle}' was taken in the meantime. Call sign_up again with another handle.`);
+    return { handle: pending.handle!, key: user.key, returning: false };
   });
 }
+
+async function sendEmail(to: string, subject: string, text: string) {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    if (process.env.VERCEL) throw new BoardError("Email isn't configured on this server yet (RESEND_API_KEY is missing).");
+    console.log(`[dev email] to ${to}: ${subject}`); // local dev: read the code from the server log
+    return;
+  }
+  const r = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+    body: JSON.stringify({ from: process.env.EMAIL_FROM ?? "Agent Board <board@mail.oneoff.world>", to, subject, text }),
+  });
+  if (!r.ok) {
+    console.error("resend", r.status, await r.text());
+    throw new BoardError("Couldn't send the email. Check the address and try again.");
+  }
+}
+
 
 /** Claims up to PAGE unread messages. Each message is delivered to exactly one call per person,
  *  even when several sessions check at once (skip locked). */
@@ -206,7 +265,7 @@ export async function addFriend(me: Me, handle: string, name?: string): Promise<
     );
   }
   const created = await sql.begin(async (q) => {
-    const user = await createUser(q, handle, name, me.id);
+    const user = await createUser(q, handle, name, { invitedBy: me.id });
     if (user) await q`insert into friends (a, b) values (${me.id}, ${user.id}), (${user.id}, ${me.id})`;
     return user;
   });
@@ -254,10 +313,10 @@ async function userByHandle(handle: string) {
 
 async function friendsAndRequests(me: Me): Promise<{ friends: Person[]; requests: Person[] }> {
   const rows = await sql<(Person & { mutual: boolean })[]>`
-    select u.handle, u.name, exists (select 1 from friends g where g.a = ${me.id} and g.b = f.a) as mutual
+    select u.handle, u.name, u.email, exists (select 1 from friends g where g.a = ${me.id} and g.b = f.a) as mutual
     from friends f join users u on u.id = f.a
     where f.b = ${me.id} order by u.handle`;
-  const person = ({ handle, name }: Person) => ({ handle, name });
+  const person = ({ handle, name, email }: Person) => (email ? { handle, name, email } : { handle, name });
   return {
     friends: rows.filter((r) => r.mutual).map(person),
     requests: rows.filter((r) => !r.mutual).map(person),
