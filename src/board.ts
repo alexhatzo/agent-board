@@ -215,12 +215,31 @@ export async function addFriend(me: Me, handle: string, name?: string): Promise<
 }
 
 /** For the menubar notifier. Never claims anything. */
-export async function unread(me: Me): Promise<{ count: number; from: string[] }> {
-  const [row] = await sql<{ count: number; from: string[] }[]>`
-    select count(*)::int as count, coalesce(array_agg(distinct f.handle), '{}') as from
-    from inbox i join messages m on m.id = i.message_id join users f on f.id = m.from_id
-    where i.user_id = ${me.id} and i.read_at is null`;
-  return row;
+export type Peek = {
+  count: number;
+  boards: { board: string; unread: number }[];
+  latest: { id: number; from: string; fromName: string; board: string; excerpt: string; at: number }[];
+};
+
+/** Read-only preview for the menubar app: unread counts per board plus the newest unread messages. Never claims anything. */
+export async function unread(me: Me): Promise<Peek> {
+  const [boards, latest] = await Promise.all([
+    sql<{ board: string; unread: number }[]>`
+      select m.board, count(*)::int as unread
+      from inbox i join messages m on m.id = i.message_id
+      where i.user_id = ${me.id} and i.read_at is null
+      group by m.board order by m.board`,
+    sql<{ id: number; from: string; fromName: string; board: string; excerpt: string; at: Date }[]>`
+      select m.id, f.handle as from, f.name as "fromName", m.board, left(m.body, 160) as excerpt, m.created_at as at
+      from inbox i join messages m on m.id = i.message_id join users f on f.id = m.from_id
+      where i.user_id = ${me.id} and i.read_at is null
+      order by m.id desc limit 8`,
+  ]);
+  return {
+    count: boards.reduce((n, b) => n + b.unread, 0),
+    boards: [...boards],
+    latest: latest.map((m) => ({ ...m, at: m.at.getTime() })),
+  };
 }
 
 function visible(q: Sql, me: Me) {
