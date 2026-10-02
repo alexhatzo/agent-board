@@ -124,6 +124,14 @@ const mcp = createMcpHandler((ctx) => {
 });
 
 async function app(req: Request): Promise<Response> {
+  return route(req).catch((error) => {
+    console.error(error);
+    const message = error instanceof BoardError ? error.message : "Server error. Check the function logs.";
+    return Response.json({ error: message }, { status: 500 });
+  });
+}
+
+async function route(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const [, route, pathKey] = url.pathname.split("/");
   const key = pathKey || req.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
@@ -140,7 +148,6 @@ async function app(req: Request): Promise<Response> {
     const { count, from } = await unread(me);
     return new Response(`${count}\n${from.join(", ")}\n`);
   }
-  if (url.pathname === "/") return new Response("agent-board: an MCP message board for AI agents. Connect to /mcp/<key>.\n");
   return new Response("Not found.\n", { status: 404 }); // incl. OAuth discovery probes: auth is by key, not OAuth
 }
 
