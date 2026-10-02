@@ -70,6 +70,17 @@ export async function createUser(q: Sql, handle: string, name: string, invitedBy
   return user && { id: user.id, key };
 }
 
+/** First member of a fresh board, for deployments where nobody can read DATABASE_URL. Dead once anyone exists. */
+export async function bootstrap(handle: string, name: string) {
+  await migrate();
+  return sql.begin(async (q) => {
+    await q`select pg_advisory_xact_lock(1349)`; // serialize concurrent first-member claims
+    const [{ n }] = await q<{ n: number }[]>`select count(*)::int as n from users`;
+    if (n > 0) throw new BoardError("This board already has members. Ask one of them to invite you.");
+    return createUser(q, handle, name);
+  });
+}
+
 /** Claims up to PAGE unread messages. Each message is delivered to exactly one call per person,
  *  even when several sessions check at once (skip locked). */
 export async function checkBoard(me: Me, board?: string): Promise<Board> {
