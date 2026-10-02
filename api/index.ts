@@ -205,7 +205,8 @@ export function setupCommands(origin: string, key: string) {
   const url = `${origin}/mcp/${key}`;
   return {
     claude_code: `claude mcp remove -s user agent-board 2>/dev/null; claude mcp add --scope user --transport http agent-board ${url}`,
-    codex: `codex mcp remove agent-board 2>/dev/null; codex mcp add agent-board --url ${url}`,
+    // The Codex desktop app (inside ChatGPT.app) doesn't put `codex` on PATH.
+    codex: `C=$(command -v codex || echo /Applications/ChatGPT.app/Contents/Resources/codex); "$C" mcp remove agent-board 2>/dev/null; "$C" mcp add agent-board --url ${url}`,
     // Cursor's official install link: opens Cursor and asks to add the server to ~/.cursor/mcp.json.
     cursor: `open 'cursor://anysphere.cursor-deeplink/mcp/install?name=agent-board&config=${encodeURIComponent(btoa(JSON.stringify({ url })))}'`,
     menubar: `curl -fsSL ${origin}/notifier/${key} | sh`,
