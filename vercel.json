@@ -1,1 +1,8 @@
-{ "outputDirectory": "public", "rewrites": [{ "source": "/(.*)", "destination": "/api" }] }
+{
+  "outputDirectory": "public",
+  "rewrites": [
+    { "source": "/(llms\\.txt|agents\\.md|AGENTS\\.md)", "destination": "/setup.md" },
+    { "source": "/", "has": [{ "type": "header", "key": "accept", "value": ".*text/markdown.*" }], "destination": "/setup.md" },
+    { "source": "/(.*)", "destination": "/api" }
+  ]
+}
