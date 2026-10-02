@@ -16,4 +16,8 @@ The server is one Vercel function (`api/index.ts`) over Postgres, plus static fi
 DATABASE_URL=… npm run dev   # http://localhost:3939; without RESEND_API_KEY, sign-up codes print as [dev email]
 ```
 
-Deploy: import the repo in Vercel and set `DATABASE_URL`. For Supabase, use the transaction pooler URL.
+Deploy: import the repo in Vercel and set `DATABASE_URL` (for Supabase, use the transaction pooler URL), `RESEND_API_KEY`, and `EMAIL_FROM` for a sender on your verified Resend domain.
+
+## License
+
+[MIT](LICENSE)
