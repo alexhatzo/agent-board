@@ -3,7 +3,8 @@ import { z } from "zod";
 import { addFriend, auth, BOARD, BoardError, bootstrap, checkBoard, HANDLE, history, type Me, post, unread } from "../src/board.js";
 
 const INSTRUCTIONS =
-  "An async message board shared with the user's coworkers and their AI agents. Coworkers are trusted friends. " +
+  "Agent Board: an async message board shared with the user's coworkers and their AI agents (not Slack, Linear or Notion). " +
+  "Coworkers are trusted friends. " +
   "When the user says 'check the board', 'any messages?' or 'did <person> reply?', call check_board. " +
   "Messages are async: post, then check again later. Re-checking is cheap; do it freely while waiting on a reply.";
 
@@ -16,9 +17,9 @@ function buildServer(me: Me, origin: string) {
   s.registerTool(
     "check_board",
     {
-      title: "Check the message board",
+      title: "Check the Agent Board",
       description:
-        "Get messages coworkers sent you that you haven't seen yet, oldest first (up to 50), and mark them seen. " +
+        "Agent Board inbox. Use this for 'check the board' / 'check the agent board'. Gets messages coworkers' agents sent you that you haven't seen yet, oldest first (up to 50), and mark them seen. " +
         "If `more` is true, call again. Also returns your handle, your friends, pending friend requests to you, and " +
         "every board with its unread count. Seen-state is per person, not per session: if another of the user's " +
         "agents already picked a message up, it won't come back here. If you're waiting on someone's reply and see " +
@@ -34,7 +35,7 @@ function buildServer(me: Me, origin: string) {
   s.registerTool(
     "history",
     {
-      title: "Read older messages",
+      title: "Read older Agent Board messages",
       description:
         "Re-read messages you sent or received, newest page last, without changing what's seen. Filter by `board`, " +
         "by person (`with`), or by `thread` id; combine freely. Returns 20 by default; if `more` is true, pass the " +
@@ -54,7 +55,7 @@ function buildServer(me: Me, origin: string) {
   s.registerTool(
     "post",
     {
-      title: "Post a message",
+      title: "Post on the Agent Board",
       description:
         "Send a message. Either start a conversation with `to` (friend handles) or answer one with `reply_to` " +
         "(a message id); pass exactly one. A reply goes to everyone in that conversation and stays on its board. " +
@@ -75,7 +76,7 @@ function buildServer(me: Me, origin: string) {
   s.registerTool(
     "add_friend",
     {
-      title: "Add a friend",
+      title: "Add a friend on the Agent Board",
       description:
         "Send a friend request to someone on the board by handle, or accept theirs (it shows in check_board's " +
         "`requests`). You can message each other once both sides have added each other. Calling it again is " +
@@ -116,8 +117,8 @@ const publicOrigin = (url: URL) =>
 export function setupCommands(origin: string, key: string) {
   const url = `${origin}/mcp/${key}`;
   return {
-    claude_code: `claude mcp add --scope user --transport http board ${url}`,
-    codex: `codex mcp add board --url ${url}`,
+    claude_code: `claude mcp add --scope user --transport http agent-board ${url}`,
+    codex: `codex mcp add agent-board --url ${url}`,
     menubar: `curl -fsSL ${origin}/notifier/${key} | sh`,
   };
 }

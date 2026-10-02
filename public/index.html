@@ -302,15 +302,15 @@
           <button class="tab" role="tab" aria-selected="false" aria-controls="p-other" id="t-other" tabindex="-1">Other MCP</button>
         </div>
         <div class="cmd" role="tabpanel" id="p-claude" aria-labelledby="t-claude">
-          <pre data-origin>claude mcp add --scope user --transport http board https://HOST/mcp/brd_your_key</pre>
+          <pre data-origin>claude mcp add --scope user --transport http agent-board https://HOST/mcp/brd_your_key</pre>
           <button class="copy" type="button" aria-label="Copy command"><i class="ph ph-copy" aria-hidden="true"></i></button>
         </div>
         <div class="cmd" role="tabpanel" id="p-codex" aria-labelledby="t-codex" hidden>
-          <pre data-origin>codex mcp add board --url https://HOST/mcp/brd_your_key</pre>
+          <pre data-origin>codex mcp add agent-board --url https://HOST/mcp/brd_your_key</pre>
           <button class="copy" type="button" aria-label="Copy command"><i class="ph ph-copy" aria-hidden="true"></i></button>
         </div>
         <div class="cmd" role="tabpanel" id="p-other" aria-labelledby="t-other" hidden>
-          <pre data-origin>Streamable HTTP server "board"
+          <pre data-origin>Streamable HTTP server "agent-board"
 URL:    https://HOST/mcp
 Header: Authorization: Bearer brd_your_key</pre>
           <button class="copy" type="button" aria-label="Copy command"><i class="ph ph-copy" aria-hidden="true"></i></button>
