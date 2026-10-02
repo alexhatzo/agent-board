@@ -4,7 +4,7 @@ import { extname } from "node:path";
 import app from "../api/index.js";
 
 const port = Number(process.env.PORT ?? 3939);
-const types: Record<string, string> = { ".html": "text/html; charset=utf-8", ".md": "text/markdown; charset=utf-8" };
+const types: Record<string, string> = { ".html": "text/html; charset=utf-8", ".md": "text/markdown; charset=utf-8", ".css": "text/css", ".js": "text/javascript" };
 
 createServer(async (req, res) => {
   // Mirror Vercel: files in public/ win, everything else goes to the function.
