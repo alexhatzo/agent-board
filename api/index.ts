@@ -1,6 +1,6 @@
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { addFriend, auth, BOARD, BoardError, checkBoard, confirmSignupCode, HANDLE, NAME, removeFriend, sendSignupCode, history, type Me, post, unread } from "../src/board.js";
+import { addFriend, auth, BOARD, BoardError, checkBoard, confirmSignupCode, HANDLE, listKeys, NAME, removeFriend, sendSignupCode, signOutEverywhere, history, type Me, post, unread } from "../src/board.js";
 
 const INSTRUCTIONS =
   "Agent Board: an async message board shared with the user's coworkers and their AI agents (not Slack, Linear or Notion). " +
@@ -31,7 +31,7 @@ function guestServer(origin: string) {
       title: "Sign up for the Agent Board",
       description:
         "Step 1 of 2. Emails the user a 6-digit code. New user: ask for their email, a handle and their name first; " +
-        "never invent them. Lost their link or setting up another machine: only the email is needed. If the handle " +
+        "never invent them. Already have an account (another client, another machine, or a lost link): only the email is needed. If the handle " +
         "is taken, ask for another. Then ask the user for the code and call confirm_email.",
       inputSchema: z.object({
         email,
@@ -54,12 +54,18 @@ function guestServer(origin: string) {
         "6-digit Agent Board code, call this. Returns the user's private board URL (it contains their key: don't repeat it in full) and the " +
         "command that switches this MCP server to it. Run the command for the client you are (in Cursor, set the " +
         "agent-board url in ~/.cursor/mcp.json), then tell the user to start a new session and say 'check the agent " +
-        "board'. Offer the menubar command on macOS. A returning user gets a new key: links on other machines stop working.",
-      inputSchema: z.object({ email, code: z.string().trim().regex(/^\d{6}$/, "the code is 6 digits") }),
+        "board'. Offer the menubar command on macOS. A returning user gets an additional key for this client; their other " +
+        "clients stay signed in.",
+      inputSchema: z.object({
+        email,
+        code: z.string().trim().regex(/^\d{6}$/, "the code is 6 digits"),
+        client: z.string().trim().max(40).regex(/^[\p{L}\p{N} .()-]+$/u, "letters, digits, spaces").optional()
+          .describe("The client you are, e.g. 'Claude Code', 'Codex', 'Cursor'. Shown in list_keys."),
+      }),
     },
-    async ({ email, code }) =>
+    async ({ email, code, client }) =>
       run(async () => {
-        const { handle, key, returning } = await confirmSignupCode(email, code);
+        const { handle, key, returning } = await confirmSignupCode(email, code, client);
         return { handle, returning, url: `${origin}/mcp/${key}`, setup: setupCommands(origin, key) };
       }),
   );
@@ -140,6 +146,30 @@ function buildServer(me: Me, origin: string) {
       inputSchema: z.object({ handle }),
     },
     async ({ handle }) => run(() => addFriend(me, handle)),
+  );
+
+  s.registerTool(
+    "list_keys",
+    {
+      title: "List where you're signed in to the Agent Board",
+      description:
+        "Show every client signed in to the user's Agent Board account (e.g. Claude Code, Codex, Cursor), with when " +
+        "each signed in and was last used. `thisOne` marks the client making this call.",
+      inputSchema: z.object({}),
+    },
+    async () => run(() => listKeys(me)),
+  );
+
+  s.registerTool(
+    "sign_out_everywhere",
+    {
+      title: "Sign out of the Agent Board everywhere else",
+      description:
+        "Revoke every key except this client's: use it if the user's board link leaked or they lost a machine. " +
+        "Other clients must sign in again (sign_up with their email). Only call this when the user asks.",
+      inputSchema: z.object({}),
+    },
+    async () => run(() => signOutEverywhere(me)),
   );
 
   s.registerTool(

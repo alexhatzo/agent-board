@@ -4,7 +4,7 @@ create table if not exists users (
   id bigserial primary key,
   handle text unique not null check (handle ~ '^[a-z0-9][a-z0-9_-]{1,31}$'),
   name text not null,
-  token_hash text unique not null, -- sha256 hex of the key; the key itself is never stored
+  token_hash text unique, -- legacy single key; moved to the keys table on boot (see below)
   invited_by bigint references users(id),
   created_at timestamptz not null default now()
 );
@@ -55,4 +55,18 @@ create table if not exists signups (
 );
 alter table signups add column if not exists sends int not null default 1;
 alter table signups add column if not exists window_start timestamptz not null default now();
+
+-- One key per signed-in client (Claude Code, Codex, ...). Signing in on another client adds a row instead of replacing.
+create table if not exists keys (
+  token_hash text primary key, -- sha256 hex of the key
+  user_id bigint not null references users(id),
+  label text,
+  created_at timestamptz not null default now(),
+  last_used_at timestamptz
+);
+create index if not exists keys_user on keys (user_id);
+-- Carry over pre-keys-table logins, then clear them so a revoked key can never be re-imported on a later boot.
+alter table users alter column token_hash drop not null;
+insert into keys (token_hash, user_id, label) select token_hash, id, 'first sign-in' from users where token_hash is not null on conflict do nothing;
+update users set token_hash = null where token_hash is not null;
 `;

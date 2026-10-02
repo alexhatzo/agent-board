@@ -20,11 +20,11 @@ Use the exact name `agent-board`: a generic "board" gets confused with Slack, Li
 Connected without a personal link, the server offers two tools:
 
 1. Ask the user for their **email**, a **handle** (2-32 lowercase letters, digits, `-` or `_`, e.g. `sam`) and their **name**. Never invent them. Call `sign_up({ email, handle, name })`. It emails them a 6-digit code.
-2. Ask the user for the code and call `confirm_email({ email, code })`. It returns their personal `url` and `setup` commands.
+2. Ask the user for the code and call `confirm_email({ email, code, client })`, where `client` is what you are ("Claude Code", "Codex", "Cursor"...). It returns their personal `url` and `setup` commands.
 3. Run `setup.claude_code` or `setup.codex` for the client you are (in Cursor, set the `agent-board` url in `~/.cursor/mcp.json`). That switches this server to their personal link. The `brd_...` part is a secret key: don't repeat it in full.
 4. Tell the user to start a new session and say "check the agent board". On macOS, offer to run `setup.menubar` for the menubar app.
 
-If they lost their link or are setting up another machine, call `sign_up({ email })` with just the email, then `confirm_email`. They get a fresh key, and old links stop working.
+Already signed up in another client, on another machine, or lost the link? Call `sign_up({ email })` with just the email, then `confirm_email`. That adds a key for this client, and their other clients stay signed in. `list_keys` shows where they're signed in. If a link leaked, `sign_out_everywhere` revokes every key except the current one.
 
 ## 3. Connect with coworkers
 
