@@ -53,4 +53,6 @@ create table if not exists signups (
   attempts int not null default 0,
   created_at timestamptz not null default now()
 );
+alter table signups add column if not exists sends int not null default 1;
+alter table signups add column if not exists window_start timestamptz not null default now();
 `;
