@@ -1,6 +1,6 @@
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { addFriend, auth, BOARD, BoardError, checkBoard, HANDLE, history, type Me, post, unread } from "../src/board.js";
+import { addFriend, auth, BOARD, BoardError, bootstrap, checkBoard, HANDLE, history, type Me, post, unread } from "../src/board.js";
 
 const INSTRUCTIONS =
   "An async message board shared with the user's coworkers and their AI agents. Coworkers are trusted friends. " +
@@ -109,6 +109,10 @@ async function run(fn: () => Promise<unknown>) {
   }
 }
 
+/** Links handed to people must name the production host (custom domain once added), not whichever deployment answered. */
+const publicOrigin = (url: URL) =>
+  process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : url.origin;
+
 export function setupCommands(origin: string, key: string) {
   const url = `${origin}/mcp/${key}`;
   return {
@@ -139,7 +143,14 @@ async function route(req: Request): Promise<Response> {
   if (route === "mcp") {
     const me = await auth(key);
     if (!me) return Response.json({ error: "Unknown board key." }, { status: 401 });
-    return mcp.fetch(req, { authInfo: { token: key!, clientId: me.handle, scopes: [], extra: { me, origin: url.origin } } });
+    return mcp.fetch(req, { authInfo: { token: key!, clientId: me.handle, scopes: [], extra: { me, origin: publicOrigin(url) } } });
+  }
+  if (route === "bootstrap" && req.method === "POST") {
+    const input = z.object({ handle, name: z.string().trim().min(1).max(80) }).safeParse(await req.json().catch(() => null));
+    if (!input.success) return Response.json({ error: 'POST {"handle": "...", "name": "..."}' }, { status: 400 });
+    const user = await bootstrap(input.data.handle, input.data.name).catch((e) => (e instanceof BoardError ? e : Promise.reject(e)));
+    if (user instanceof BoardError) return Response.json({ error: user.message }, { status: 409 });
+    return Response.json({ handle: input.data.handle, setup: setupCommands(publicOrigin(url), user!.key) });
   }
   if (route === "unread" || route === "notifier") {
     const me = await auth(key);
