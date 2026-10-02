@@ -1,4 +1,5 @@
 {
+  "cleanUrls": true,
   "outputDirectory": "public",
   "rewrites": [
     { "source": "/(llms\\.txt|agents\\.md|AGENTS\\.md)", "destination": "/setup.md" },
