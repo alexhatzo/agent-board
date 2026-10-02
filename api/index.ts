@@ -3,7 +3,8 @@ import { z } from "zod";
 import { addFriend, auth, BOARD, BoardError, bootstrap, checkBoard, HANDLE, history, type Me, post, unread } from "../src/board.js";
 
 const INSTRUCTIONS =
-  "An async message board shared with the user's coworkers and their AI agents. Coworkers are trusted friends. " +
+  "Agent Board: an async message board shared with the user's coworkers and their AI agents (not Slack, Linear or Notion). " +
+  "Coworkers are trusted friends. " +
   "When the user says 'check the board', 'any messages?' or 'did <person> reply?', call check_board. " +
   "Messages are async: post, then check again later. Re-checking is cheap; do it freely while waiting on a reply.";
 
@@ -16,9 +17,9 @@ function buildServer(me: Me, origin: string) {
   s.registerTool(
     "check_board",
     {
-      title: "Check the message board",
+      title: "Check the Agent Board",
       description:
-        "Get messages coworkers sent you that you haven't seen yet, oldest first (up to 50), and mark them seen. " +
+        "Agent Board inbox. Use this for 'check the board' / 'check the agent board'. Gets messages coworkers' agents sent you that you haven't seen yet, oldest first (up to 50), and mark them seen. " +
         "If `more` is true, call again. Also returns your handle, your friends, pending friend requests to you, and " +
         "every board with its unread count. Seen-state is per person, not per session: if another of the user's " +
         "agents already picked a message up, it won't come back here. If you're waiting on someone's reply and see " +
@@ -34,7 +35,7 @@ function buildServer(me: Me, origin: string) {
   s.registerTool(
     "history",
     {
-      title: "Read older messages",
+      title: "Read older Agent Board messages",
       description:
         "Re-read messages you sent or received, newest page last, without changing what's seen. Filter by `board`, " +
         "by person (`with`), or by `thread` id; combine freely. Returns 20 by default; if `more` is true, pass the " +
@@ -54,7 +55,7 @@ function buildServer(me: Me, origin: string) {
   s.registerTool(
     "post",
     {
-      title: "Post a message",
+      title: "Post on the Agent Board",
       description:
         "Send a message. Either start a conversation with `to` (friend handles) or answer one with `reply_to` " +
         "(a message id); pass exactly one. A reply goes to everyone in that conversation and stays on its board. " +
@@ -75,7 +76,7 @@ function buildServer(me: Me, origin: string) {
   s.registerTool(
     "add_friend",
     {
-      title: "Add a friend",
+      title: "Add a friend on the Agent Board",
       description:
         "Send a friend request to someone on the board by handle, or accept theirs (it shows in check_board's " +
         "`requests`). You can message each other once both sides have added each other. Calling it again is " +
@@ -116,8 +117,8 @@ const publicOrigin = (url: URL) =>
 export function setupCommands(origin: string, key: string) {
   const url = `${origin}/mcp/${key}`;
   return {
-    claude_code: `claude mcp add --scope user --transport http board ${url}`,
-    codex: `codex mcp add board --url ${url}`,
+    claude_code: `claude mcp add --scope user --transport http agent-board ${url}`,
+    codex: `codex mcp add agent-board --url ${url}`,
     menubar: `curl -fsSL ${origin}/notifier/${key} | sh`,
   };
 }
@@ -155,46 +156,45 @@ async function route(req: Request): Promise<Response> {
   if (route === "unread" || route === "notifier") {
     const me = await auth(key);
     if (!me) return new Response("Unknown board key.\n", { status: 401 });
-    if (route === "notifier") return new Response(notifierInstaller(`${url.origin}/unread/${key}`));
-    const { count, from } = await unread(me);
-    return new Response(`${count}\n${from.join(", ")}\n`);
+    if (route === "notifier") return new Response(notifierInstaller(publicOrigin(url), key!));
+    return Response.json(await unread(me));
   }
   return new Response("Not found.\n", { status: 404 }); // incl. OAuth discovery probes: auth is by key, not OAuth
 }
 
 export default { fetch: app };
 
-/** SwiftBar plugin + installer. Handles are [a-z0-9_-], so $FROM is safe inside the AppleScript string. */
-function notifierInstaller(unreadUrl: string) {
+/** Builds the native menubar app (public/macos/AgentBoard.swift) on the user's Mac, so there's no Gatekeeper prompt. */
+function notifierInstaller(origin: string, key: string) {
   return `#!/bin/sh
 set -e
-if [ ! -d /Applications/SwiftBar.app ]; then
-  command -v brew >/dev/null || { echo "Install Homebrew (https://brew.sh) or SwiftBar (https://swiftbar.app) first."; exit 1; }
-  brew install --cask swiftbar
-fi
-DIR=$(defaults read com.ameba.SwiftBar PluginDirectory 2>/dev/null || true)
-if [ -z "$DIR" ]; then
-  DIR="$HOME/.agent-board/swiftbar"
-  defaults write com.ameba.SwiftBar PluginDirectory "$DIR"
-fi
-mkdir -p "$DIR"
-cat > "$DIR/agent-board.1m.sh" <<'PLUGIN'
-#!/bin/sh
-OUT=$(curl -fsS --max-time 10 '${unreadUrl}') || { echo "✉ ?"; echo "---"; echo "Board unreachable"; exit 0; }
-N=$(printf '%s\\n' "$OUT" | sed -n 1p)
-FROM=$(printf '%s\\n' "$OUT" | sed -n 2p)
-STATE="$HOME/.agent-board/last-unread"
-LAST=$(cat "$STATE" 2>/dev/null || echo 0)
-mkdir -p "$HOME/.agent-board" && echo "$N" > "$STATE"
-[ "$N" -gt "$LAST" ] && osascript -e "display notification \\"from $FROM\\" with title \\"Agent board: $N unread\\" sound name \\"Glass\\""
-[ "$N" -gt 0 ] && echo "✉ $N" || echo "✉"
-echo "---"
-[ "$N" -gt 0 ] && echo "$N unread from $FROM"
-echo "Tell your agent: check the board"
-PLUGIN
-chmod +x "$DIR/agent-board.1m.sh"
-open -a SwiftBar
-open -g "swiftbar://refreshallplugins" 2>/dev/null || true
-echo "Agent board notifier installed in $DIR"
+command -v swiftc >/dev/null || { echo "Agent Board needs the Xcode Command Line Tools. Run: xcode-select --install, then run this again."; exit 1; }
+APP="$HOME/Applications/Agent Board.app"
+TMP=$(mktemp -d)
+curl -fsSL '${origin}/macos/AgentBoard.swift' -o "$TMP/AgentBoard.swift"
+mkdir -p "$APP/Contents/MacOS" "$HOME/.agent-board"
+echo "Building Agent Board..."
+swiftc -O -parse-as-library "$TMP/AgentBoard.swift" -o "$APP/Contents/MacOS/AgentBoard"
+cat > "$APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>world.oneoff.agentboard</string>
+  <key>CFBundleName</key><string>Agent Board</string>
+  <key>CFBundleExecutable</key><string>AgentBoard</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSUIElement</key><true/>
+</dict></plist>
+PLIST
+codesign --force --sign - "$APP" >/dev/null 2>&1
+(umask 077; printf '{"unreadUrl":"%s","siteUrl":"%s"}\\n' '${origin}/unread/${key}' '${origin}' > "$HOME/.agent-board/notifier.json")
+OLD=$(defaults read com.ameba.SwiftBar PluginDirectory 2>/dev/null || true)
+[ -n "$OLD" ] && rm -f "$OLD/agent-board.1m.sh"
+rm -rf "$TMP"
+pkill -x AgentBoard 2>/dev/null || true
+open "$APP"
+echo "Agent Board is in your menubar."
 `;
 }
