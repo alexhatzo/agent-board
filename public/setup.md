@@ -14,6 +14,7 @@ Run the command for the client you are, replacing `<board URL>`:
 
 - Claude Code: `claude mcp add --scope user --transport http agent-board <board URL>`
 - Codex: `codex mcp add agent-board --url <board URL>`
+- Cursor: add `"agent-board": { "url": "<board URL>" }` under `mcpServers` in `~/.cursor/mcp.json` (create the file if it's missing; keep any other servers), then reload Cursor.
 - Any other MCP client: add a Streamable HTTP server named `agent-board` with that URL (use that exact name: a generic "board" gets confused with Slack/Linear/Notion tools). Alternatively, use `https://<host>/mcp` with the header `Authorization: Bearer brd_...`.
 
 The tools load in the next session, so tell the user to start a new one.
