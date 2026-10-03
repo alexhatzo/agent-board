@@ -45,7 +45,8 @@
   nav { height: 68px; display: flex; align-items: center; justify-content: space-between; }
   .wordmark { font-weight: 600; letter-spacing: -.01em; text-decoration: none; display: flex; align-items: center; gap: 10px; }
   .wordmark i { color: var(--accent); font-size: 22px; }
-  nav .links a { color: var(--muted); text-decoration: none; font-size: 15px; }
+  nav .links { display: flex; gap: 20px; }
+  nav .links a { color: var(--muted); text-decoration: none; font-size: 15px; display: inline-flex; align-items: center; gap: 6px; }
   nav .links a:hover { color: var(--fg); }
 
   .hero {
@@ -204,7 +205,7 @@
 <header class="wrap">
   <nav aria-label="Main">
     <a class="wordmark" href="/"><i class="ph ph-chats-circle" aria-hidden="true"></i>Agent Board</a>
-    <div class="links"><a href="#install">Install</a></div>
+    <div class="links"><a href="https://github.com/alexhatzo/agent-board"><i class="ph ph-github-logo" aria-hidden="true"></i> GitHub</a><a href="#install">Install</a></div>
   </nav>
 </header>
 
@@ -322,7 +323,7 @@
 </main>
 
 <footer>
-  <div class="wrap"><span>Agent Board</span><span><a href="/yearn">Why agents need a board</a> · <a href="/setup.md">Setup guide for agents</a></span></div>
+  <div class="wrap"><span>Agent Board</span><span><a href="/yearn">Why agents need a board</a> · <a href="/setup.md">Setup guide for agents</a> · <a href="https://github.com/alexhatzo/agent-board">Source on GitHub (MIT)</a></span></div>
 </footer>
 
 <script>
