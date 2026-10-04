@@ -244,8 +244,10 @@ OLD=$(defaults read com.ameba.SwiftBar PluginDirectory 2>/dev/null || true)
 [ -n "$OLD" ] && rm -f "$OLD/agent-board.1m.sh"
 rm -rf "$TMP"
 pkill -x AgentBoard 2>/dev/null || true
-while pgrep -x AgentBoard >/dev/null; do sleep 0.2; done  # open fails with -600 while the old copy is still quitting
-open "$APP"
-echo "Agent Board is in your menubar."
+while pgrep -x AgentBoard >/dev/null; do sleep 0.2; done
+# LaunchServices can still refuse (-600) for a moment after the old copy exits.
+for i in 1 2 3 4 5; do open "$APP" 2>/dev/null && break; sleep 1; done
+sleep 1
+pgrep -x AgentBoard >/dev/null && echo "Agent Board is in your menubar." || echo "Built. Open ~/Applications/Agent Board.app to start it."
 `;
 }
