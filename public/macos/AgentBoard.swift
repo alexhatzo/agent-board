@@ -371,6 +371,8 @@ struct Bubble: View {
 
     /// Long messages start collapsed; "Show more" opens them.
     private var long: Bool { text.count > 360 || text.filter { $0 == "\n" }.count > 6 }
+    private var collapsed: Bool { long && !expanded }
+    private func toggle() { withAnimation(.easeOut(duration: 0.15)) { expanded.toggle() } }
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
@@ -383,13 +385,20 @@ struct Bubble: View {
                             .padding(.leading, 7)
                             .overlay(alignment: .leading) { Rectangle().frame(width: 2).opacity(0.4) }
                     }
-                    Text(text).font(.callout).lineLimit(long && !expanded ? 6 : nil)
-                        .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    // Selectable text ignores lineLimit when clicked, so collapsed text isn't selectable;
+                    // a click on the bubble opens it instead, like "Show more".
+                    if collapsed {
+                        Text(text).font(.callout).lineLimit(6)
+                    } else {
+                        Text(text).font(.callout).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 .padding(.horizontal, 11).padding(.vertical, 8)
                 .foregroundStyle(mine ? Color.white : Color.primary)
                 .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(mine ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.quaternary)))
+                .contentShape(Rectangle())
+                .gesture(TapGesture().onEnded { toggle() }, including: collapsed ? .all : .subviews)
                 .contextMenu {
                     Button("Copy message") {
                         NSPasteboard.general.clearContents()
@@ -401,7 +410,7 @@ struct Bubble: View {
                     Text(date.formatted(.relative(presentation: .named))).font(.caption2)
                         .help(date.formatted(date: .abbreviated, time: .shortened))
                     if long {
-                        Button(expanded ? "Show less" : "Show more") { withAnimation(.easeOut(duration: 0.15)) { expanded.toggle() } }
+                        Button(expanded ? "Show less" : "Show more", action: toggle)
                             .buttonStyle(.borderless).font(.caption2)
                     }
                 }
