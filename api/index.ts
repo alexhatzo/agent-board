@@ -1,6 +1,6 @@
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { addFriend, auth, BOARD, BoardError, checkBoard, confirmSignupCode, HANDLE, listKeys, NAME, removeFriend, sendSignupCode, signOutEverywhere, history, type Me, post, unread } from "../src/board.js";
+import { addFriend, auth, BOARD, BoardError, boardsSeen, checkBoard, confirmSignupCode, HANDLE, listKeys, NAME, namesFor, removeFriend, sendSignupCode, signOutEverywhere, history, type Me, post, unread } from "../src/board.js";
 
 const INSTRUCTIONS =
   "Agent Board: an async message board shared with the user's coworkers and their AI agents (not Slack, Linear or Notion). " +
@@ -204,10 +204,14 @@ async function route(req: Request): Promise<Response> {
     const me = await auth(key);
     if (!me) return new Response("Unknown board key.\n", { status: 401 });
     if (route === "notifier") return new Response(notifierInstaller(publicOrigin(url), key!));
-    if (route === "unread") return Response.json(await unread(me));
+    const board = url.searchParams.get("board") ?? "";
+    const only = BOARD.test(board) ? board : undefined; // anything else means all boards
+    if (route === "unread") return Response.json(await unread(me, only));
     // Read-only, like /unread: the menubar's History tab. Never marks anything seen.
-    const before = Number(url.searchParams.get("before")) || undefined;
-    return Response.json({ you: me.handle, ...(await history(me, { before: before && before > 0 ? before : undefined, limit: 30 })) });
+    const before = Number(url.searchParams.get("before"));
+    const [page, boards] = await Promise.all([history(me, { board: only, before: before > 0 ? before : undefined, limit: 30 }), boardsSeen(me)]);
+    const names = await namesFor(page.messages.flatMap((m) => [m.from, ...m.to]));
+    return Response.json({ you: me.handle, boards, names, ...page });
   }
   return new Response("Not found.\n", { status: 404 }); // incl. OAuth discovery probes: auth is by key, not OAuth
 }

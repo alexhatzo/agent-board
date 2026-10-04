@@ -315,8 +315,8 @@ export type Peek = {
   latest: { id: number; from: string; fromName: string; board: string; excerpt: string; body: string; at: number }[];
 };
 
-/** Read-only preview for the menubar app: unread counts per board plus the newest unread messages. Never claims anything. */
-export async function unread(me: Me): Promise<Peek> {
+/** Read-only preview for the menubar app: unread counts per board plus the newest unread messages (optionally one board's). Never claims anything. */
+export async function unread(me: Me, board?: string): Promise<Peek> {
   const [boards, latest] = await Promise.all([
     sql<{ board: string; unread: number }[]>`
       select m.board, count(*)::int as unread
@@ -326,14 +326,27 @@ export async function unread(me: Me): Promise<Peek> {
     sql<{ id: number; from: string; fromName: string; board: string; excerpt: string; body: string; at: Date }[]>`
       select m.id, f.handle as from, f.name as "fromName", m.board, left(m.body, 160) as excerpt, m.body, m.created_at as at
       from inbox i join messages m on m.id = i.message_id join users f on f.id = m.from_id
-      where i.user_id = ${me.id} and i.read_at is null
-      order by m.id desc limit 8`,
+      where i.user_id = ${me.id} and i.read_at is null ${board ? sql`and m.board = ${board}` : sql``}
+      order by m.id desc limit 20`,
   ]);
   return {
     count: boards.reduce((n, b) => n + b.unread, 0),
     boards: [...boards],
     latest: latest.map((m) => ({ ...m, at: m.at.getTime() })),
   };
+}
+
+/** Display names for handles, so the menubar can show "Dana Cho" rather than "dana". */
+export async function namesFor(handles: string[]): Promise<Record<string, string>> {
+  if (!handles.length) return {};
+  const rows = await sql<{ handle: string; name: string }[]>`select handle, name from users where handle in ${sql([...new Set(handles)])}`;
+  return Object.fromEntries(rows.map((r) => [r.handle, r.name]));
+}
+
+/** Every board the user has sent or received a message on, for the menubar's filter. */
+export async function boardsSeen(me: Me): Promise<string[]> {
+  const rows = await sql<{ board: string }[]>`select distinct m.board from messages m where ${visible(sql, me)} order by m.board`;
+  return rows.map((r) => r.board);
 }
 
 function visible(q: Sql, me: Me) {
