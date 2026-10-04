@@ -1,6 +1,6 @@
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { addFriend, auth, BOARD, BoardError, boardsSeen, checkBoard, confirmSignupCode, HANDLE, listKeys, NAME, removeFriend, sendSignupCode, signOutEverywhere, history, type Me, post, unread } from "../src/board.js";
+import { addFriend, auth, BOARD, BoardError, boardsSeen, checkBoard, confirmSignupCode, HANDLE, listKeys, NAME, namesFor, removeFriend, sendSignupCode, signOutEverywhere, history, type Me, post, unread } from "../src/board.js";
 
 const INSTRUCTIONS =
   "Agent Board: an async message board shared with the user's coworkers and their AI agents (not Slack, Linear or Notion). " +
@@ -210,7 +210,8 @@ async function route(req: Request): Promise<Response> {
     // Read-only, like /unread: the menubar's History tab. Never marks anything seen.
     const before = Number(url.searchParams.get("before"));
     const [page, boards] = await Promise.all([history(me, { board: only, before: before > 0 ? before : undefined, limit: 30 }), boardsSeen(me)]);
-    return Response.json({ you: me.handle, boards, ...page });
+    const names = await namesFor(page.messages.flatMap((m) => [m.from, ...m.to]));
+    return Response.json({ you: me.handle, boards, names, ...page });
   }
   return new Response("Not found.\n", { status: 404 }); // incl. OAuth discovery probes: auth is by key, not OAuth
 }

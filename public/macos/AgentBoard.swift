@@ -37,6 +37,7 @@ struct HistoryPage: Decodable {
     }
     let you: String
     let boards: [String]?
+    let names: [String: String]? // handle → display name
     let messages: [Msg] // oldest first
     let more: Bool
     let before: Int?
@@ -57,6 +58,7 @@ final class BoardModel: ObservableObject {
     @Published var board: String?         // nil = all boards
     @Published var history: [HistoryPage.Msg] = [] // oldest first, like a chat
     @Published var historyBoards: [String] = []
+    @Published var names: [String: String] = [:]
     @Published var historyMore = false
     @Published var historyLoading = false
     @Published var historyProblem: String?
@@ -127,6 +129,7 @@ final class BoardModel: ObservableObject {
             historyMore = page.more
             historyBefore = page.before
             historyBoards = page.boards ?? historyBoards
+            names.merge(page.names ?? [:]) { _, new in new }
             you = page.you
             historyProblem = nil
         } catch {
@@ -310,9 +313,10 @@ struct Panel: View {
             }
             ForEach(model.history) { msg in
                 let mine = msg.from == model.you
-                Bubble(mine: mine, handle: msg.from, sender: mine ? "To \(msg.to.joined(separator: ", "))" : msg.from,
+                let name = { (h: String) in model.names[h] ?? h }
+                Bubble(mine: mine, handle: msg.from, sender: mine ? "To \(msg.to.map(name).joined(separator: ", "))" : name(msg.from),
                        board: msg.board, date: msg.date, text: msg.body,
-                       replyTo: msg.inReplyTo.map { "\($0.from): \($0.excerpt)" },
+                       replyTo: msg.inReplyTo.map { "\(name($0.from)): \($0.excerpt)" },
                        showBoard: model.board == nil, expanded: expandedBinding(msg.id))
             }
         }

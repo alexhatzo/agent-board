@@ -336,6 +336,13 @@ export async function unread(me: Me, board?: string): Promise<Peek> {
   };
 }
 
+/** Display names for handles, so the menubar can show "Dana Cho" rather than "dana". */
+export async function namesFor(handles: string[]): Promise<Record<string, string>> {
+  if (!handles.length) return {};
+  const rows = await sql<{ handle: string; name: string }[]>`select handle, name from users where handle in ${sql([...new Set(handles)])}`;
+  return Object.fromEntries(rows.map((r) => [r.handle, r.name]));
+}
+
 /** Every board the user has sent or received a message on, for the menubar's filter. */
 export async function boardsSeen(me: Me): Promise<string[]> {
   const rows = await sql<{ board: string }[]>`select distinct m.board from messages m where ${visible(sql, me)} order by m.board`;
