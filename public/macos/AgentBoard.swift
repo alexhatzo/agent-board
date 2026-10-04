@@ -17,12 +17,12 @@ struct Peek: Decodable {
     struct Board: Decodable, Identifiable { let board: String; let unread: Int; var id: String { board } }
     struct Item: Decodable, Identifiable {
         let id: Int, from: String, fromName: String, board: String, excerpt: String, at: Double
-        let body: String? // absent from servers older than the History tab
+        let body: String? // absent from older servers
         var date: Date { Date(timeIntervalSince1970: at / 1000) }
     }
     let count: Int
     let boards: [Board]
-    let latest: [Item]
+    let latest: [Item] // newest first
 }
 
 struct HistoryPage: Decodable {
@@ -36,6 +36,7 @@ struct HistoryPage: Decodable {
         }()
     }
     let you: String
+    let boards: [String]?
     let messages: [Msg] // oldest first
     let more: Bool
     let before: Int?
@@ -50,9 +51,12 @@ final class Banners: NSObject, UNUserNotificationCenterDelegate {
 
 @MainActor
 final class BoardModel: ObservableObject {
-    @Published var peek: Peek?
+    @Published var peek: Peek?            // all boards: drives the badge and notifications
+    @Published var filtered: Peek?        // the selected board's unread, when a filter is on
     @Published var problem: String?
-    @Published var history: [HistoryPage.Msg] = [] // newest first
+    @Published var board: String?         // nil = all boards
+    @Published var history: [HistoryPage.Msg] = [] // oldest first, like a chat
+    @Published var historyBoards: [String] = []
     @Published var historyMore = false
     @Published var historyLoading = false
     @Published var historyProblem: String?
@@ -74,6 +78,7 @@ final class BoardModel: ObservableObject {
         center.delegate = banners
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
         Task { [weak self] in
+            await self?.loadHistory() // fills the board chips before anyone opens History
             while let self {
                 await self.refresh()
                 try? await Task.sleep(for: .seconds(30))
@@ -81,11 +86,27 @@ final class BoardModel: ObservableObject {
         }
     }
 
+    /// Unread messages on screen: the filtered board's, or everything.
+    var unreadShown: [Peek.Item] { (board == nil ? peek : filtered)?.latest.reversed() ?? [] }
+
+    /// Every board worth a filter chip: ones with unread plus ones in history.
+    var allBoards: [String] { Array(Set((peek?.boards.map(\.board) ?? []) + historyBoards)).sorted() }
+
+    func unreadCount(_ board: String) -> Int { peek?.boards.first { $0.board == board }?.unread ?? 0 }
+
+    func select(_ board: String?) async {
+        self.board = board
+        filtered = nil
+        await refresh()
+        await loadHistory()
+    }
+
     func refresh() async {
         guard let config else { return }
         do {
             let peek = try await Self.get(Peek.self, config.unreadUrl)
             self.peek = peek
+            if let board { filtered = try await Self.get(Peek.self, Self.with(config.unreadUrl, board: board)) }
             problem = nil
             notify(peek.latest)
         } catch {
@@ -93,24 +114,31 @@ final class BoardModel: ObservableObject {
         }
     }
 
-    /// First page on open or refresh; `older` appends the next page back.
+    /// First page on open or refresh; `older` prepends the next page back.
     func loadHistory(older: Bool = false) async {
         guard let config, !historyLoading else { return }
         historyLoading = true
         defer { historyLoading = false }
-        var url = config.historyUrl
+        var url = Self.with(config.historyUrl, board: board)
         if older, let before = historyBefore { url.append(queryItems: [URLQueryItem(name: "before", value: String(before))]) }
         do {
             let page = try await Self.get(HistoryPage.self, url)
-            let newestFirst = Array(page.messages.reversed())
-            history = older ? history + newestFirst : newestFirst
+            history = older ? page.messages + history : page.messages
             historyMore = page.more
             historyBefore = page.before
+            historyBoards = page.boards ?? historyBoards
             you = page.you
             historyProblem = nil
         } catch {
             historyProblem = "Can't load history right now. If this keeps happening, reinstall the menubar app from the Agent Board site."
         }
+    }
+
+    private static func with(_ url: URL, board: String?) -> URL {
+        guard let board else { return url }
+        var url = url
+        url.append(queryItems: [URLQueryItem(name: "board", value: board)])
+        return url
     }
 
     private static func get<T: Decodable>(_: T.Type, _ url: URL) async throws -> T {
@@ -160,16 +188,22 @@ enum Tab: Hashable { case unread, history }
 struct Panel: View {
     @ObservedObject var model: BoardModel
     @State private var tab = Tab.unread
-    @State private var expanded: Int?
+    @State private var expanded: Set<Int> = []
     @State private var copied = false
     @State private var atLogin = SMAppService.mainApp.status == .enabled
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: "bubble.left.and.bubble.right.fill").foregroundStyle(.tint)
                 Text("Agent Board").font(.headline)
                 Spacer()
+                Picker("", selection: $tab) {
+                    Text(unreadLabel).tag(Tab.unread)
+                    Text("History").tag(Tab.history)
+                }
+                .pickerStyle(.segmented).labelsHidden().fixedSize()
+                .onChange(of: tab) { _, now in if now == .history { Task { await model.loadHistory() } } }
                 Button {
                     Task { tab == .history ? await model.loadHistory() : await model.refresh() }
                 } label: { Image(systemName: "arrow.clockwise") }
@@ -177,30 +211,37 @@ struct Panel: View {
                     .help("Refresh")
             }
 
-            Picker("", selection: $tab) {
-                Text(unreadLabel).tag(Tab.unread)
-                Text("History").tag(Tab.history)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .onChange(of: tab) { _, now in
-                expanded = nil
-                if now == .history { Task { await model.loadHistory() } }
-            }
-
-            if tab == .unread, let boards = model.peek?.boards, !boards.isEmpty {
+            if !model.allBoards.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) { ForEach(boards) { BoardChip(board: $0) } }
+                    HStack(spacing: 6) {
+                        BoardChip(name: "All", unread: model.peek?.count ?? 0, selected: model.board == nil) {
+                            Task { await model.select(nil) }
+                        }
+                        ForEach(model.allBoards, id: \.self) { b in
+                            BoardChip(name: "#\(b)", unread: model.unreadCount(b), selected: model.board == b) {
+                                Task { await model.select(b) }
+                            }
+                        }
+                    }
                 }
             }
 
             Divider()
-            ScrollView {
-                VStack { if tab == .unread { unread } else { history } }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        if tab == .unread { unread } else { history }
+                        Color.clear.frame(height: 1).id("bottom")
+                    }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 4)
+                }
+                .frame(minHeight: 120, maxHeight: 460)
+                .fixedSize(horizontal: false, vertical: true)
+                .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
+                .onChange(of: tab) { _, _ in DispatchQueue.main.async { proxy.scrollTo("bottom", anchor: .bottom) } }
+                .onChange(of: model.board) { _, _ in DispatchQueue.main.async { proxy.scrollTo("bottom", anchor: .bottom) } }
             }
-            .frame(minHeight: 90, maxHeight: 440)
-            .fixedSize(horizontal: false, vertical: true)
             Divider()
 
             HStack {
@@ -225,7 +266,7 @@ struct Panel: View {
             .font(.callout)
         }
         .padding(14)
-        .frame(width: 380)
+        .frame(width: 400)
     }
 
     private var unreadLabel: String {
@@ -236,28 +277,22 @@ struct Panel: View {
     @ViewBuilder private var unread: some View {
         if let problem = model.problem {
             Notice(text: problem, icon: "wifi.exclamationmark")
-        } else if model.peek == nil {
-            ProgressView().frame(maxWidth: .infinity, minHeight: 80)
-        } else if let latest = model.peek?.latest, !latest.isEmpty {
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(latest) { item in
-                    MessageRow(handle: item.from, title: item.fromName, board: item.board, date: item.date,
-                               excerpt: item.excerpt, text: item.body ?? item.excerpt,
-                               expanded: expandedBinding(item.id))
-                }
-                if let count = model.peek?.count, count > latest.count {
-                    Text("\(count - latest.count) more unread. Ask your agent to check the board.")
-                        .font(.caption).foregroundStyle(.secondary).padding(.top, 4)
-                }
-            }
+        } else if model.peek == nil || (model.board != nil && model.filtered == nil) {
+            ProgressView().frame(maxWidth: .infinity, minHeight: 100)
+        } else if model.unreadShown.isEmpty {
+            Notice(text: model.board.map { "Nothing unread on #\($0)." } ?? "All caught up. New messages from your coworkers' agents show up here.",
+                   icon: "tray")
         } else {
-            VStack(spacing: 6) {
-                Image(systemName: "tray").font(.title2).foregroundStyle(.tertiary)
-                Text("All caught up").font(.callout.weight(.medium))
-                Text("New messages from your coworkers' agents show up here.")
-                    .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            let shown = model.unreadShown
+            let total = model.board.map(model.unreadCount) ?? model.peek?.count ?? 0
+            if total > shown.count {
+                Text("\(total - shown.count) older unread not shown. Ask your agent to check the board.")
+                    .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity)
             }
-            .frame(maxWidth: .infinity, minHeight: 90)
+            ForEach(shown) { item in
+                Bubble(mine: false, handle: item.from, sender: item.fromName, board: item.board, date: item.date,
+                       text: item.body ?? item.excerpt, showBoard: model.board == nil, expanded: expandedBinding(item.id))
+            }
         }
     }
 
@@ -265,30 +300,26 @@ struct Panel: View {
         if let problem = model.historyProblem, model.history.isEmpty {
             Notice(text: problem, icon: "exclamationmark.triangle")
         } else if model.history.isEmpty {
-            if model.historyLoading { ProgressView().frame(maxWidth: .infinity, minHeight: 80) }
-            else { Notice(text: "No messages yet. Sent and received messages show up here.", icon: "clock") }
+            if model.historyLoading { ProgressView().frame(maxWidth: .infinity, minHeight: 100) }
+            else { Notice(text: model.board.map { "No messages on #\($0) yet." } ?? "No messages yet.", icon: "clock") }
         } else {
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(model.history) { msg in
-                    let mine = msg.from == model.you
-                    MessageRow(handle: msg.from,
-                               title: mine ? "You → \(msg.to.joined(separator: ", "))" : msg.from,
-                               board: msg.board, date: msg.date,
-                               excerpt: msg.body, text: msg.body,
-                               replyTo: msg.inReplyTo.map { "\($0.from): \($0.excerpt)" },
-                               expanded: expandedBinding(msg.id))
-                }
-                if model.historyMore {
-                    Button(model.historyLoading ? "Loading…" : "Load older") { Task { await model.loadHistory(older: true) } }
-                        .buttonStyle(.borderless).font(.callout).disabled(model.historyLoading)
-                        .frame(maxWidth: .infinity).padding(.top, 6)
-                }
+            if model.historyMore {
+                Button(model.historyLoading ? "Loading…" : "Load older") { Task { await model.loadHistory(older: true) } }
+                    .buttonStyle(.borderless).font(.callout).disabled(model.historyLoading)
+                    .frame(maxWidth: .infinity)
+            }
+            ForEach(model.history) { msg in
+                let mine = msg.from == model.you
+                Bubble(mine: mine, handle: msg.from, sender: mine ? "To \(msg.to.joined(separator: ", "))" : msg.from,
+                       board: msg.board, date: msg.date, text: msg.body,
+                       replyTo: msg.inReplyTo.map { "\($0.from): \($0.excerpt)" },
+                       showBoard: model.board == nil, expanded: expandedBinding(msg.id))
             }
         }
     }
 
     private func expandedBinding(_ id: Int) -> Binding<Bool> {
-        Binding(get: { expanded == id }, set: { expanded = $0 ? id : nil })
+        Binding(get: { expanded.contains(id) }, set: { on in if on { expanded.insert(id) } else { expanded.remove(id) } })
     }
 
     private func copyPrompt() {
@@ -303,79 +334,86 @@ struct Notice: View {
     let text: String, icon: String
     var body: some View {
         Label(text, systemImage: icon).font(.callout).foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, minHeight: 80)
+            .frame(maxWidth: .infinity, minHeight: 100)
     }
 }
 
 struct BoardChip: View {
-    let board: Peek.Board
+    let name: String, unread: Int, selected: Bool
+    let action: () -> Void
     var body: some View {
-        HStack(spacing: 4) {
-            Text("#\(board.board)").font(.caption.monospaced())
-            Text("\(board.unread)").font(.caption2.weight(.semibold)).foregroundStyle(.white)
-                .padding(.horizontal, 5).background(Capsule().fill(Color.accentColor))
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Text(name).font(.caption.monospaced())
+                if unread > 0 {
+                    Text("\(unread)").font(.caption2.weight(.semibold)).foregroundStyle(selected ? Color.accentColor : .white)
+                        .padding(.horizontal, 5).background(Capsule().fill(selected ? Color.white : Color.accentColor))
+                }
+            }
+            .foregroundStyle(selected ? Color.white : Color.primary)
+            .padding(.horizontal, 9).padding(.vertical, 4)
+            .background(Capsule().fill(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.quaternary)))
         }
-        .padding(.horizontal, 8).padding(.vertical, 4)
-        .background(Capsule().fill(.quaternary))
+        .buttonStyle(.plain)
     }
 }
 
-/// One message. Tap to expand to the full, selectable text.
-struct MessageRow: View {
-    let handle: String, title: String, board: String, date: Date, excerpt: String, text: String
+/// One chat bubble: yours on the right in the accent colour, everyone else's on the left.
+struct Bubble: View {
+    let mine: Bool, handle: String, sender: String, board: String, date: Date, text: String
     var replyTo: String? = nil
+    var showBoard = true
     @Binding var expanded: Bool
-    @State private var copied = false
+
+    /// Long messages start collapsed; "Show more" opens them.
+    private var long: Bool { text.count > 360 || text.filter { $0 == "\n" }.count > 6 }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Text(handle.prefix(1).uppercased())
-                .font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
-                .frame(width: 28, height: 28)
-                .background(Circle().fill(Self.color(for: handle)))
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text(title).font(.subheadline.weight(.semibold)).lineLimit(1)
-                    Text("#\(board)").font(.caption.monospaced())
-                        .padding(.horizontal, 6).padding(.vertical, 1)
-                        .background(Capsule().fill(.quaternary))
-                    Spacer(minLength: 4)
-                    Text(date.formatted(.relative(presentation: .named))).font(.caption).foregroundStyle(.secondary)
-                    Image(systemName: "chevron.right").font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
-                        .rotationEffect(.degrees(expanded ? 90 : 0))
-                }
-                .contentShape(Rectangle())
-                .onTapGesture(perform: toggle)
-                if expanded {
+        HStack(alignment: .bottom, spacing: 8) {
+            if mine { Spacer(minLength: 48) } else { avatar }
+            VStack(alignment: mine ? .trailing : .leading, spacing: 3) {
+                Text(sender).font(.caption.weight(.semibold)).foregroundStyle(.secondary).lineLimit(1)
+                VStack(alignment: .leading, spacing: 6) {
                     if let replyTo {
-                        Text("Re: \(replyTo)").font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                            .padding(.leading, 8)
-                            .overlay(alignment: .leading) { Rectangle().fill(.quaternary).frame(width: 2) }
+                        Text(replyTo).font(.caption).lineLimit(2).opacity(0.75)
+                            .padding(.leading, 7)
+                            .overlay(alignment: .leading) { Rectangle().frame(width: 2).opacity(0.4) }
                     }
-                    Text(text).font(.callout).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: 12) {
-                        Button(copied ? "Copied" : "Copy text") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(text, forType: .string)
-                            copied = true
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
-                        }
-                        Text(date.formatted(date: .abbreviated, time: .shortened)).foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.borderless).font(.caption)
-                } else {
-                    Text(excerpt).font(.callout).foregroundStyle(.secondary).lineLimit(2)
-                        .contentShape(Rectangle())
-                        .onTapGesture(perform: toggle)
+                    Text(text).font(.callout).lineLimit(long && !expanded ? 6 : nil)
+                        .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                 }
+                .padding(.horizontal, 11).padding(.vertical, 8)
+                .foregroundStyle(mine ? Color.white : Color.primary)
+                .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(mine ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.quaternary)))
+                .contextMenu {
+                    Button("Copy message") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(text, forType: .string)
+                    }
+                }
+                HStack(spacing: 6) {
+                    if showBoard { Text("#\(board)").font(.caption2.monospaced()) }
+                    Text(date.formatted(.relative(presentation: .named))).font(.caption2)
+                        .help(date.formatted(date: .abbreviated, time: .shortened))
+                    if long {
+                        Button(expanded ? "Show less" : "Show more") { withAnimation(.easeOut(duration: 0.15)) { expanded.toggle() } }
+                            .buttonStyle(.borderless).font(.caption2)
+                    }
+                }
+                .foregroundStyle(.secondary)
             }
+            if mine { avatar } else { Spacer(minLength: 48) }
         }
-        .padding(.vertical, 6).padding(.horizontal, 6)
-        .background(RoundedRectangle(cornerRadius: 8).fill(expanded ? AnyShapeStyle(.quaternary.opacity(0.5)) : AnyShapeStyle(.clear)))
-        .help(expanded ? "Click the header to collapse" : "Click to show the full message")
     }
 
-    private func toggle() { withAnimation(.easeOut(duration: 0.15)) { expanded.toggle() } }
+    private var avatar: some View {
+        Text(handle.prefix(1).uppercased())
+            .font(.system(size: 12, weight: .semibold)).foregroundStyle(.white)
+            .frame(width: 26, height: 26)
+            .background(Circle().fill(Self.color(for: handle)))
+            .padding(.bottom, 18) // line up with the bubble, not the meta line under it
+    }
 
     /// Stable per-handle color (String.hashValue changes every launch).
     static func color(for handle: String) -> Color {
