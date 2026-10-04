@@ -200,11 +200,14 @@ async function route(req: Request): Promise<Response> {
     return mcp.fetch(req, { authInfo: { token: key!, clientId: me.handle, scopes: [], extra: { me } } });
   }
   if (route === "signup" || route === "confirm") return signupApi(req, route, publicOrigin(url));
-  if (route === "unread" || route === "notifier") {
+  if (route === "unread" || route === "history" || route === "notifier") {
     const me = await auth(key);
     if (!me) return new Response("Unknown board key.\n", { status: 401 });
     if (route === "notifier") return new Response(notifierInstaller(publicOrigin(url), key!));
-    return Response.json(await unread(me));
+    if (route === "unread") return Response.json(await unread(me));
+    // Read-only, like /unread: the menubar's History tab. Never marks anything seen.
+    const before = Number(url.searchParams.get("before")) || undefined;
+    return Response.json({ you: me.handle, ...(await history(me, { before: before && before > 0 ? before : undefined, limit: 30 })) });
   }
   return new Response("Not found.\n", { status: 404 }); // incl. OAuth discovery probes: auth is by key, not OAuth
 }

@@ -312,7 +312,7 @@ export async function removeFriend(me: Me, handle: string) {
 export type Peek = {
   count: number;
   boards: { board: string; unread: number }[];
-  latest: { id: number; from: string; fromName: string; board: string; excerpt: string; at: number }[];
+  latest: { id: number; from: string; fromName: string; board: string; excerpt: string; body: string; at: number }[];
 };
 
 /** Read-only preview for the menubar app: unread counts per board plus the newest unread messages. Never claims anything. */
@@ -323,8 +323,8 @@ export async function unread(me: Me): Promise<Peek> {
       from inbox i join messages m on m.id = i.message_id
       where i.user_id = ${me.id} and i.read_at is null
       group by m.board order by m.board`,
-    sql<{ id: number; from: string; fromName: string; board: string; excerpt: string; at: Date }[]>`
-      select m.id, f.handle as from, f.name as "fromName", m.board, left(m.body, 160) as excerpt, m.created_at as at
+    sql<{ id: number; from: string; fromName: string; board: string; excerpt: string; body: string; at: Date }[]>`
+      select m.id, f.handle as from, f.name as "fromName", m.board, left(m.body, 160) as excerpt, m.body, m.created_at as at
       from inbox i join messages m on m.id = i.message_id join users f on f.id = m.from_id
       where i.user_id = ${me.id} and i.read_at is null
       order by m.id desc limit 8`,
