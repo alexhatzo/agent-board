@@ -22,6 +22,8 @@ export const HANDLE = /^[a-z0-9][a-z0-9_-]{1,31}$/;
 export const BOARD = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 /** Display names reach other people's agents (friend requests) before anyone accepts, so: letters, spaces, . ' - only. */
 export const NAME = /^\p{L}[\p{L}\p{M} .'-]{0,59}$/u;
+/** Group names reach every member's agent, so the same tight alphabet plus digits and &. */
+export const GROUP_NAME = /^[\p{L}\p{N}][\p{L}\p{M}\p{N} .'&-]{0,59}$/u;
 const PAGE = 50;
 
 /** keyHash: the key this request authenticated with (sign_out_everywhere keeps it). */
@@ -29,6 +31,8 @@ export type Me = { id: number; handle: string; name: string; keyHash: string };
 export type Msg = {
   id: number;
   thread: number;
+  conversation: number;
+  group?: string;
   board: string;
   from: string;
   to: string[];
@@ -41,12 +45,14 @@ export type Board = {
   you: string;
   friends: Person[];
   requests: Person[];
+  groups: Group[];
   boards: { board: string; unread: number }[];
   messages: Msg[];
   more: boolean;
 };
 export type History = { messages: Msg[]; more: boolean; before?: number };
-export type Sent = { id: number; thread: number; board: string; to: string[] };
+export type Sent = { id: number; thread: number; conversation: number; group?: string; board: string; to: string[] };
+export type Group = { id: number; name: string; members: string[] };
 export type FriendResult = Person & { status: "friends" | "requested" };
 
 /** Its message is shown to the agent verbatim, so it should say what to do next. */
@@ -186,12 +192,13 @@ export async function checkBoard(me: Me, board?: string): Promise<Board> {
       for update of i skip locked)
     returning message_id`;
   const ids = claimed.map((c) => c.message_id);
-  const [messages, [{ more }], people, boards] = await Promise.all([
+  const [messages, [{ more }], people, groups, boards] = await Promise.all([
     ids.length ? selectMessages(sql`m.id in ${sql(ids)}`, sql`order by m.id`) : [],
     sql<{ more: boolean }[]>`
       select exists(select 1 from inbox i join messages m on m.id = i.message_id
                     where i.user_id = ${me.id} and i.read_at is null ${onBoard}) as more`,
     friendsAndRequests(me),
+    myGroups(me),
     // ponytail: scans every visible message; add a per-user board summary table if this gets slow
     sql<{ board: string; unread: number }[]>`
       select m.board, (count(*) filter (where i.read_at is null and i.user_id is not null))::int as unread
@@ -199,24 +206,23 @@ export async function checkBoard(me: Me, board?: string): Promise<Board> {
       where m.from_id = ${me.id} or i.user_id is not null
       group by m.board order by m.board`,
   ]);
-  return { you: me.handle, ...people, boards: [...boards], messages, more };
+  return { you: me.handle, ...people, groups, boards: [...boards], messages, more };
 }
 
 /** Read-only replay of anything I sent or received. Never changes read state. */
 export async function history(
   me: Me,
-  o: { board?: string; with?: string; thread?: number; before?: number; limit?: number },
+  o: { board?: string; with?: string; conversation?: number; thread?: number; before?: number; limit?: number },
 ): Promise<History> {
   const limit = o.limit ?? 20;
   const conds = [visible(sql, me)];
   if (o.board) conds.push(sql`m.board = ${o.board}`);
+  if (o.conversation !== undefined) conds.push(sql`m.conversation_id = ${o.conversation}`);
   if (o.thread !== undefined) conds.push(sql`coalesce(m.thread_id, m.id) = ${o.thread}`);
   if (o.before !== undefined) conds.push(sql`m.id < ${o.before}`);
   if (o.with) {
     const other = await userByHandle(o.with);
-    conds.push(sql`(
-      (m.from_id = ${me.id} and exists (select 1 from inbox w where w.user_id = ${other.id} and w.message_id = m.id)) or
-      (m.from_id = ${other.id} and exists (select 1 from inbox w where w.user_id = ${me.id} and w.message_id = m.id)))`);
+    conds.push(sql`m.conversation_id = ${(await findConversation(sql, [me.id, other.id])) ?? 0}`);
   }
   const where = conds.reduce((a, c) => sql`${a} and ${c}`);
   const rows = await selectMessages(where, sql`order by m.id desc limit ${limit + 1}`);
@@ -225,64 +231,159 @@ export async function history(
   return more ? { messages, more, before: messages[0].id } : { messages, more };
 }
 
-/** Starts a conversation (`to`) or replies to everyone in one (`reply_to`). One transaction. */
+/** Starts or continues a conversation: `to` (people), `group` (a conversation id) or `reply_to` (a message id). One transaction. */
 export async function post(
   me: Me,
-  i: { body: string; to?: string[]; reply_to?: number; board?: string },
+  i: { body: string; to?: string[]; group?: number; reply_to?: number; board?: string },
 ): Promise<Sent> {
-  if ((i.to === undefined) === (i.reply_to === undefined)) {
-    throw new BoardError("Pass exactly one of `to` (start a conversation) or `reply_to` (answer a message).");
+  if ([i.to, i.group, i.reply_to].filter((x) => x !== undefined).length !== 1) {
+    throw new BoardError("Pass exactly one of `to` (people), `group` (a group id) or `reply_to` (a message id).");
   }
   return sql.begin(async (q) => {
-    let recipients: { id: number; handle: string }[];
+    let conversation: number;
     let thread: number | null = null;
     let board = i.board ?? "general";
 
     if (i.reply_to !== undefined) {
-      if (i.board) throw new BoardError("A reply stays on its conversation's board. Drop `board`.");
-      const [parent] = await q<{ id: number; thread: number; board: string; from_id: number }[]>`
-        select m.id, coalesce(m.thread_id, m.id) as thread, m.board, m.from_id
+      if (i.board) throw new BoardError("A reply stays on its message's board. Drop `board`.");
+      const [parent] = await q<{ thread: number; board: string; conversation: number }[]>`
+        select coalesce(m.thread_id, m.id) as thread, m.board, m.conversation_id as conversation
         from messages m where m.id = ${i.reply_to} and ${visible(q, me)}`;
       if (!parent) throw new BoardError(`No message #${i.reply_to} that you can see. Use history to find the right id.`);
-      thread = parent.thread;
-      board = parent.board;
-      // Reply-all, but only to people you're still friends with (remove_friend cuts off old threads too).
-      recipients = await q`
-        select u.id, u.handle from users u where u.id <> ${me.id}
-          and (u.id = ${parent.from_id} or u.id in (select user_id from inbox where message_id = ${parent.id}))
-          and exists (select 1 from friends where a = ${me.id} and b = u.id)
-          and exists (select 1 from friends where a = u.id and b = ${me.id})`;
-      if (!recipients.length) throw new BoardError("Nobody you're still friends with is in that conversation.");
+      ({ thread, board, conversation } = parent);
+    } else if (i.group !== undefined) {
+      conversation = i.group;
     } else {
-      const handles = [...new Set(i.to)];
-      if (handles.includes(me.handle)) throw new BoardError("You can't message yourself.");
-      const found = await q<{ id: number; handle: string; friend: boolean }[]>`
-        select u.id, u.handle,
-          exists (select 1 from friends where a = ${me.id} and b = u.id) and
-          exists (select 1 from friends where a = u.id and b = ${me.id}) as friend
-        from users u where u.handle in ${q(handles)}`;
-      const unknown = handles.filter((h) => !found.some((f) => f.handle === h));
-      const strangers = found.filter((f) => !f.friend).map((f) => f.handle);
-      if (unknown.length || strangers.length) {
-        const { friends } = await friendsAndRequests(me);
-        const mine = friends.map((f) => f.handle).join(", ") || "none yet";
-        throw new BoardError(
-          [
-            unknown.length && `No one called ${unknown.join(", ")} is on the board.`,
-            strangers.length && `You're not friends with ${strangers.join(", ")} yet: add_friend sends a request they must accept.`,
-            `Your friends: ${mine}.`,
-          ].filter(Boolean).join(" "),
-        );
-      }
-      recipients = found;
+      // Messaging people directly takes friendship with each of them; the conversation is the one with exactly these people.
+      const people = await friendsByHandle(q, me, i.to!);
+      const ids = [me.id, ...people.map((p) => p.id)];
+      await q`select pg_advisory_xact_lock(hashtext(${[...ids].sort((a, b) => a - b).join(",")}))`;
+      conversation = (await findConversation(q, ids)) ?? (await createConversation(q, me, null, people.map((p) => p.id)));
     }
 
+    const recipients = await recipientsOf(q, me, conversation);
     const [m] = await q<{ id: number }[]>`
-      insert into messages (thread_id, reply_to, board, from_id, body)
-      values (${thread}, ${i.reply_to ?? null}, ${board}, ${me.id}, ${i.body}) returning id`;
-    await q`insert into inbox ${q(recipients.map((r) => ({ user_id: r.id, message_id: m.id })))}`;
-    return { id: m.id, thread: thread ?? m.id, board, to: recipients.map((r) => r.handle).sort() };
+      insert into messages (thread_id, reply_to, board, from_id, body, conversation_id)
+      values (${thread}, ${i.reply_to ?? null}, ${board}, ${me.id}, ${i.body}, ${conversation}) returning id`;
+    if (recipients.people.length) await q`insert into inbox ${q(recipients.people.map((r) => ({ user_id: r.id, message_id: m.id })))}`;
+    return {
+      id: m.id, thread: thread ?? m.id, conversation, ...(recipients.name ? { group: recipients.name } : {}),
+      board, to: recipients.people.map((r) => r.handle).sort(),
+    };
   });
+}
+
+/** Everyone else in a conversation I'm in. A one-to-one chat also needs us to still be friends (remove_friend ends it);
+ *  in a group, membership is enough. */
+async function recipientsOf(q: Sql, me: Me, conversation: number) {
+  const [c] = await q<{ name: string | null; others: { id: number; handle: string; friend: boolean }[] }[]>`
+    select c.name, coalesce(json_agg(json_build_object('id', u.id, 'handle', u.handle, 'friend',
+        exists (select 1 from friends where a = ${me.id} and b = u.id) and exists (select 1 from friends where a = u.id and b = ${me.id})))
+      filter (where u.id is not null), '[]') as others
+    from conversations c
+    join members mine on mine.conversation_id = c.id and mine.user_id = ${me.id}
+    left join members x on x.conversation_id = c.id and x.user_id <> ${me.id}
+    left join users u on u.id = x.user_id
+    where c.id = ${conversation} group by c.id`;
+  if (!c) throw new BoardError(`You're not in conversation #${conversation}. check_board lists your groups.`);
+  if (!c.name && c.others.length === 1 && !c.others[0].friend) {
+    throw new BoardError(`You and ${c.others[0].handle} aren't friends any more, so you can't message each other.`);
+  }
+  return { name: c.name ?? undefined, people: c.others };
+}
+
+/** Resolves handles to people I'm friends with, or says exactly who isn't. */
+async function friendsByHandle(q: Sql, me: Me, list: string[]) {
+  const handles = [...new Set(list)];
+  if (handles.includes(me.handle)) throw new BoardError("You can't message yourself.");
+  const found = await q<{ id: number; handle: string; friend: boolean }[]>`
+    select u.id, u.handle,
+      exists (select 1 from friends where a = ${me.id} and b = u.id) and
+      exists (select 1 from friends where a = u.id and b = ${me.id}) as friend
+    from users u where u.handle in ${q(handles)}`;
+  const unknown = handles.filter((h) => !found.some((f) => f.handle === h));
+  const strangers = found.filter((f) => !f.friend).map((f) => f.handle);
+  if (unknown.length || strangers.length) {
+    const { friends } = await friendsAndRequests(me);
+    const mine = friends.map((f) => f.handle).join(", ") || "none yet";
+    throw new BoardError(
+      [
+        unknown.length && `No one called ${unknown.join(", ")} is on the board.`,
+        strangers.length && `You're not friends with ${strangers.join(", ")} yet: add_friend sends a request they must accept.`,
+        `Your friends: ${mine}.`,
+      ].filter(Boolean).join(" "),
+    );
+  }
+  return found;
+}
+
+/** The unnamed conversation with exactly these people, if there is one. */
+async function findConversation(q: Sql, userIds: number[]): Promise<number | undefined> {
+  const people = [...new Set(userIds)].sort((a, b) => a - b);
+  const [c] = await q<{ id: number }[]>`
+    select c.id from conversations c
+    where c.name is null and c.id in (select conversation_id from members where user_id = ${people[0]})
+      and array(select user_id from members where conversation_id = c.id order by user_id) = ${people}::bigint[]
+    limit 1`;
+  return c?.id;
+}
+
+async function createConversation(q: Sql, me: Me, name: string | null, others: number[]) {
+  const [c] = await q<{ id: number }[]>`insert into conversations (name, created_by) values (${name}, ${me.id}) returning id`;
+  await q`insert into members ${q([me.id, ...new Set(others)].map((user_id) => ({ conversation_id: c.id, user_id })))}`;
+  return c.id;
+}
+
+/** A named group. You can only put friends in it; after that, members talk to each other whether or not they're friends. */
+export async function createGroup(me: Me, name: string, handles: string[]): Promise<Group> {
+  return sql.begin(async (q) => {
+    const people = await friendsByHandle(q, me, handles);
+    const id = await createConversation(q, me, name, people.map((p) => p.id));
+    return { id, name, members: [me.handle, ...people.map((p) => p.handle)].sort() };
+  });
+}
+
+/** Any member can add one of their own friends. The newcomer sees the group's whole history. */
+export async function addToGroup(me: Me, group: number, handle: string): Promise<Group> {
+  return sql.begin(async (q) => {
+    const g = await namedGroup(q, me, group);
+    const [person] = await friendsByHandle(q, me, [handle]);
+    await q`insert into members (conversation_id, user_id) values (${group}, ${person.id}) on conflict do nothing`;
+    return groupById(q, group, g.name);
+  });
+}
+
+/** Leave a group: no more of its messages, and its history is no longer readable. */
+export async function leaveGroup(me: Me, group: number) {
+  return sql.begin(async (q) => {
+    const g = await namedGroup(q, me, group);
+    await q`delete from inbox where user_id = ${me.id} and read_at is null
+      and message_id in (select id from messages where conversation_id = ${group})`;
+    await q`delete from members where conversation_id = ${group} and user_id = ${me.id}`;
+    return { group, name: g.name, status: "left" as const };
+  });
+}
+
+async function namedGroup(q: Sql, me: Me, group: number) {
+  const [g] = await q<{ name: string | null }[]>`
+    select c.name from conversations c join members x on x.conversation_id = c.id and x.user_id = ${me.id} where c.id = ${group}`;
+  if (!g) throw new BoardError(`You're not in group #${group}. check_board lists your groups.`);
+  if (!g.name) throw new BoardError("That's a conversation, not a named group. Use create_group to start a group with these people.");
+  return { name: g.name };
+}
+
+async function groupById(q: Sql, id: number, name: string): Promise<Group> {
+  const rows = await q<{ handle: string }[]>`
+    select u.handle from members x join users u on u.id = x.user_id where x.conversation_id = ${id} order by u.handle`;
+  return { id, name, members: rows.map((r) => r.handle) };
+}
+
+async function myGroups(me: Me): Promise<Group[]> {
+  return sql<Group[]>`
+    select c.id, c.name, array(select u.handle from members y join users u on u.id = y.user_id
+                               where y.conversation_id = c.id order by u.handle) as members
+    from conversations c join members x on x.conversation_id = c.id and x.user_id = ${me.id}
+    where c.name is not null order by c.name`;
 }
 
 /** Existing user: send (or accept) a friend request. New handle + name: invite, friends at once. Idempotent. */
@@ -301,7 +402,7 @@ export async function addFriend(me: Me, handle: string): Promise<FriendResult> {
   return { handle: user.handle, name: user.name, status: mutual ? "friends" : "requested" };
 }
 
-/** Unfriend, cancel a request, or decline one: drops both directions. They can no longer message you, replies included. Idempotent. */
+/** Unfriend, cancel a request, or decline one: drops both directions. Ends your one-to-one chat; shared groups carry on. Idempotent. */
 export async function removeFriend(me: Me, handle: string) {
   const user = await userByHandle(handle);
   await sql`delete from friends where (a = ${me.id} and b = ${user.id}) or (a = ${user.id} and b = ${me.id})`;
@@ -312,7 +413,7 @@ export async function removeFriend(me: Me, handle: string) {
 export type Peek = {
   count: number;
   boards: { board: string; unread: number }[];
-  latest: { id: number; from: string; fromName: string; board: string; excerpt: string; body: string; at: number }[];
+  latest: { id: number; conversation: number; group: string | null; from: string; fromName: string; board: string; excerpt: string; body: string; at: number }[];
 };
 
 /** Read-only preview for the menubar app: unread counts per board plus the newest unread messages (optionally one board's). Never claims anything. */
@@ -323,9 +424,11 @@ export async function unread(me: Me, board?: string): Promise<Peek> {
       from inbox i join messages m on m.id = i.message_id
       where i.user_id = ${me.id} and i.read_at is null
       group by m.board order by m.board`,
-    sql<{ id: number; from: string; fromName: string; board: string; excerpt: string; body: string; at: Date }[]>`
-      select m.id, f.handle as from, f.name as "fromName", m.board, left(m.body, 160) as excerpt, m.body, m.created_at as at
+    sql<{ id: number; conversation: number; group: string | null; from: string; fromName: string; board: string; excerpt: string; body: string; at: Date }[]>`
+      select m.id, m.conversation_id as conversation, c.name as group, f.handle as from, f.name as "fromName", m.board,
+        left(m.body, 160) as excerpt, m.body, m.created_at as at
       from inbox i join messages m on m.id = i.message_id join users f on f.id = m.from_id
+      join conversations c on c.id = m.conversation_id
       where i.user_id = ${me.id} and i.read_at is null ${board ? sql`and m.board = ${board}` : sql``}
       order by m.id desc limit 20`,
   ]);
@@ -343,14 +446,58 @@ export async function namesFor(handles: string[]): Promise<Record<string, string
   return Object.fromEntries(rows.map((r) => [r.handle, r.name]));
 }
 
-/** Every board the user has sent or received a message on, for the menubar's filter. */
-export async function boardsSeen(me: Me): Promise<string[]> {
-  const rows = await sql<{ board: string }[]>`select distinct m.board from messages m where ${visible(sql, me)} order by m.board`;
+/** Every board the user has sent or received a message on (in one conversation, if given), for the menubar's filter. */
+export async function boardsSeen(me: Me, conversation?: number): Promise<string[]> {
+  const rows = await sql<{ board: string }[]>`select distinct m.board from messages m where ${visible(sql, me)}
+    ${conversation === undefined ? sql`` : sql`and m.conversation_id = ${conversation}`} order by m.board`;
   return rows.map((r) => r.board);
 }
 
+export type Conversation = {
+  id: number;
+  name: string | null; // a group's name; null for a one-to-one chat or people messaged together
+  members: string[]; // everyone but you
+  unread: number;
+  boards: { board: string; unread: number }[];
+  last?: { id: number; from: string; excerpt: string; at: number };
+};
+
+/** The menubar's top level: every conversation I'm in, most recent first, with unread counts per board. Read-only. */
+export async function conversations(me: Me): Promise<Conversation[]> {
+  const [rows, boards] = await Promise.all([
+    sql<{ id: number; name: string | null; members: string[]; last_id: number | null; last_from: string | null; excerpt: string | null; at: Date | null; created: Date }[]>`
+      select c.id, c.name, c.created_at as created,
+        array(select u.handle from members y join users u on u.id = y.user_id
+              where y.conversation_id = c.id and y.user_id <> ${me.id} order by u.handle) as members,
+        l.id as last_id, l.from as last_from, l.excerpt, l.at
+      from members x join conversations c on c.id = x.conversation_id
+      left join lateral (select m.id, f.handle as from, left(m.body, 120) as excerpt, m.created_at as at
+                         from messages m join users f on f.id = m.from_id
+                         where m.conversation_id = c.id order by m.id desc limit 1) l on true
+      where x.user_id = ${me.id}`,
+    sql<{ conversation: number; board: string; unread: number }[]>`
+      select m.conversation_id as conversation, m.board,
+        (count(*) filter (where exists (select 1 from inbox i where i.user_id = ${me.id} and i.message_id = m.id and i.read_at is null)))::int as unread
+      from messages m join members x on x.conversation_id = m.conversation_id and x.user_id = ${me.id}
+      group by 1, 2 order by 2`,
+  ]);
+  return rows
+    .map((c) => {
+      const mine = boards.filter((b) => b.conversation === c.id).map(({ board, unread }) => ({ board, unread }));
+      return {
+        id: c.id, name: c.name, members: c.members,
+        unread: mine.reduce((n, b) => n + b.unread, 0),
+        boards: mine,
+        ...(c.last_id ? { last: { id: c.last_id, from: c.last_from!, excerpt: c.excerpt!, at: c.at!.getTime() } } : {}),
+        sort: (c.at ?? c.created).getTime(),
+      };
+    })
+    .sort((a, b) => b.sort - a.sort)
+    .map(({ sort: _, ...c }) => c);
+}
+
 function visible(q: Sql, me: Me) {
-  return q`(m.from_id = ${me.id} or exists (select 1 from inbox v where v.user_id = ${me.id} and v.message_id = m.id))`;
+  return q`exists (select 1 from members v where v.user_id = ${me.id} and v.conversation_id = m.conversation_id)`;
 }
 
 async function userByHandle(handle: string) {
@@ -371,8 +518,9 @@ async function friendsAndRequests(me: Me): Promise<{ friends: Person[]; requests
   };
 }
 
-type MsgRow = Omit<Msg, "at" | "inReplyTo"> & {
+type MsgRow = Omit<Msg, "at" | "inReplyTo" | "group"> & {
   at: Date;
+  group: string | null;
   re_id: number | null;
   re_from: string | null;
   re_excerpt: string | null;
@@ -380,17 +528,20 @@ type MsgRow = Omit<Msg, "at" | "inReplyTo"> & {
 
 async function selectMessages(where: postgres.Fragment, tail: postgres.Fragment): Promise<Msg[]> {
   const rows = await sql<MsgRow[]>`
-    select m.id, coalesce(m.thread_id, m.id) as thread, m.board, f.handle as from, m.created_at as at, m.body,
+    select m.id, coalesce(m.thread_id, m.id) as thread, m.conversation_id as conversation, c.name as group,
+      m.board, f.handle as from, m.created_at as at, m.body,
       array (select u.handle from inbox x join users u on u.id = x.user_id
              where x.message_id = m.id order by u.handle) as to,
       p.id as re_id, pf.handle as re_from, left(p.body, 200) as re_excerpt
     from messages m
     join users f on f.id = m.from_id
+    join conversations c on c.id = m.conversation_id
     left join messages p on p.id = m.reply_to
     left join users pf on pf.id = p.from_id
     where ${where} ${tail}`;
-  return rows.map(({ re_id, re_from, re_excerpt, at, ...m }) => ({
+  return rows.map(({ re_id, re_from, re_excerpt, at, group, ...m }) => ({
     ...m,
+    ...(group ? { group } : {}),
     at: at.toISOString(),
     ...(re_id ? { inReplyTo: { id: re_id, from: re_from!, excerpt: re_excerpt! } } : {}),
   }));

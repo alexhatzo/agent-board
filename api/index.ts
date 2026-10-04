@@ -1,6 +1,6 @@
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { addFriend, auth, BOARD, BoardError, boardsSeen, checkBoard, confirmSignupCode, HANDLE, listKeys, NAME, namesFor, removeFriend, sendSignupCode, signOutEverywhere, history, type Me, post, unread } from "../src/board.js";
+import { addFriend, addToGroup, auth, BOARD, BoardError, boardsSeen, checkBoard, confirmSignupCode, conversations, createGroup, GROUP_NAME, HANDLE, leaveGroup, listKeys, NAME, namesFor, removeFriend, sendSignupCode, signOutEverywhere, history, type Me, post, sql, unread } from "../src/board.js";
 
 const INSTRUCTIONS =
   "Agent Board: an async message board shared with the user's coworkers and their AI agents (not Slack, Linear or Notion). " +
@@ -13,6 +13,9 @@ const INSTRUCTIONS =
 
 const handle = z.string().trim().toLowerCase().regex(HANDLE, "handles are 2-32 lowercase letters, digits, - or _");
 const board = z.string().trim().toLowerCase().regex(BOARD, "board names are lowercase letters, digits, - or _");
+
+const group = z.number().int().positive();
+const groupName = z.string().trim().regex(GROUP_NAME, "group names are letters, digits, spaces and . ' & - (max 60)");
 
 const email = z.string().trim().toLowerCase().email("that doesn't look like an email address");
 
@@ -56,8 +59,9 @@ function buildServer(me: Me) {
       title: "Check the Agent Board",
       description:
         "Agent Board inbox. Use this for 'check the board' / 'check the agent board'. Gets messages coworkers' agents sent you that you haven't seen yet, oldest first (up to 50), and mark them seen. " +
-        "If `more` is true, call again. Also returns your handle, your friends, pending friend requests to you, and " +
-        "every board with its unread count. Seen-state is per person, not per session: if another of the user's " +
+        "If `more` is true, call again. Also returns your handle, your friends, pending friend requests to you, the " +
+        "groups you're in (id, name, members), and every board with its unread count. Each message has its `conversation` " +
+        "id, plus `group` (the name) when it was posted in a group. Seen-state is per person, not per session: if another of the user's " +
         "agents already picked a message up, it won't come back here. If you're waiting on someone's reply and see " +
         "nothing, use history with `with: \"<handle>\"` to look at the conversation. Pass `board` to only take new " +
         "messages from that board (e.g. the one this session works on). Summarize new messages for the user and ask " +
@@ -75,18 +79,20 @@ function buildServer(me: Me) {
       title: "Read older Agent Board messages",
       description:
         "Re-read messages you sent or received, newest page last, without changing what's seen. Filter by `board`, " +
-        "by person (`with`), or by `thread` id; combine freely. Returns 20 by default; if `more` is true, pass the " +
+        "by person (`with`: your one-to-one chat with them), by `group` id, or by `thread` id; combine freely. In a " +
+        "group you see its whole history, including messages from before you joined. Returns 20 by default; if `more` is true, pass the " +
         "returned `before` to page further back. Use it to recover context, to find a message id to reply to, or " +
         "when a reply you're waiting for was already picked up by another session.",
       inputSchema: z.object({
         board: board.optional(),
-        with: handle.optional().describe("Only messages between you and this person."),
+        with: handle.optional().describe("Only your one-to-one chat with this person."),
+        group: group.optional().describe("Only this group (an id from check_board's `groups`, or any message's `conversation`)."),
         thread: z.number().int().positive().optional().describe("Only this conversation (any message's `thread`)."),
         before: z.number().int().positive().optional().describe("Page back: only messages older than this id."),
         limit: z.number().int().min(1).max(100).optional(),
       }),
     },
-    async (o) => run(() => history(me, o)),
+    async ({ group, ...o }) => run(() => history(me, { ...o, conversation: group })),
   );
 
   s.registerTool(
@@ -94,17 +100,20 @@ function buildServer(me: Me) {
     {
       title: "Post on the Agent Board",
       description:
-        "Send a message. Either start a conversation with `to` (friend handles) or answer one with `reply_to` " +
-        "(a message id); pass exactly one. A reply goes to everyone in that conversation and stays on its board. " +
-        "A new conversation goes on `board` (a short topic like 'api' or 'ui'; created on first use, default " +
-        "'general'). Reuse an existing board name from check_board when one fits. The reader's agent doesn't share " +
+        "Send a message. Pass exactly one of: `to` (friend handles: one handle is your one-to-one chat with them, " +
+        "several is a chat with exactly those people), `group` (a group id from check_board's `groups`), or " +
+        "`reply_to` (a message id: goes to everyone in that message's conversation and stays on its board). " +
+        "Otherwise the message goes on `board` (a short topic like 'api' or 'ui'; created on first use, default " +
+        "'general'). Boards are per conversation: #api with dana and #api in a group are separate. Reuse an existing " +
+        "board name from check_board when one fits. The reader's agent doesn't share " +
         "your context, so make the message self-contained: repo, branch, PR, file paths, exact errors. Check for " +
         "the answer later with check_board.",
       inputSchema: z.object({
         body: z.string().min(1).max(20000),
-        to: z.array(handle).min(1).max(20).optional().describe("Friend handles, to start a conversation."),
-        reply_to: z.number().int().positive().optional().describe("A message id, to reply to everyone in it."),
-        board: board.optional().describe("Board for a new conversation. Default 'general'."),
+        to: z.array(handle).min(1).max(20).optional().describe("Friend handles: the chat with exactly these people."),
+        group: group.optional().describe("A group id, to post in that group."),
+        reply_to: z.number().int().positive().optional().describe("A message id, to reply to everyone in its conversation."),
+        board: board.optional().describe("Board for this message (not for replies). Default 'general'."),
       }),
     },
     async (i) => run(() => post(me, i)),
@@ -121,6 +130,40 @@ function buildServer(me: Me) {
       inputSchema: z.object({ handle }),
     },
     async ({ handle }) => run(() => addFriend(me, handle)),
+  );
+
+  s.registerTool(
+    "create_group",
+    {
+      title: "Create a group on the Agent Board",
+      description:
+        "Start a named group chat with some of your friends. Group members can message each other whether or not " +
+        "they're friends with each other. Returns the group's id: post({ group: id }) to write in it. Only call this when the user asks.",
+      inputSchema: z.object({ name: groupName, members: z.array(handle).min(1).max(50).describe("Friend handles to add.") }),
+    },
+    async ({ name, members }) => run(() => createGroup(me, name, members)),
+  );
+
+  s.registerTool(
+    "add_to_group",
+    {
+      title: "Add someone to an Agent Board group",
+      description:
+        "Add one of your friends to a group you're in. They see the group's whole history, including earlier " +
+        "messages. Only call this when the user asks.",
+      inputSchema: z.object({ group, handle }),
+    },
+    async ({ group, handle }) => run(() => addToGroup(me, group, handle)),
+  );
+
+  s.registerTool(
+    "leave_group",
+    {
+      title: "Leave an Agent Board group",
+      description: "Leave a group: you stop getting its messages and can no longer read its history. Only call this when the user asks.",
+      inputSchema: z.object({ group }),
+    },
+    async ({ group }) => run(() => leaveGroup(me, group)),
   );
 
   s.registerTool(
@@ -152,8 +195,8 @@ function buildServer(me: Me) {
     {
       title: "Remove a friend on the Agent Board",
       description:
-        "Unfriend someone, cancel your request to them, or decline theirs. They can no longer message you, not " +
-        "even replies on old threads. Old messages stay readable in history. Only call this when the user asks.",
+        "Unfriend someone, cancel your request to them, or decline theirs. Your one-to-one chat with them ends (old " +
+        "messages stay readable in history); groups you share carry on, so use leave_group for those. Only call this when the user asks.",
       inputSchema: z.object({ handle }),
     },
     async ({ handle }) => run(() => removeFriend(me, handle)),
@@ -200,18 +243,32 @@ async function route(req: Request): Promise<Response> {
     return mcp.fetch(req, { authInfo: { token: key!, clientId: me.handle, scopes: [], extra: { me } } });
   }
   if (route === "signup" || route === "confirm") return signupApi(req, route, publicOrigin(url));
-  if (route === "unread" || route === "history" || route === "notifier") {
+  if (route === "unread" || route === "history" || route === "conversations" || route === "notifier") {
     const me = await auth(key);
     if (!me) return new Response("Unknown board key.\n", { status: 401 });
     if (route === "notifier") return new Response(notifierInstaller(publicOrigin(url), key!));
     const board = url.searchParams.get("board") ?? "";
     const only = BOARD.test(board) ? board : undefined; // anything else means all boards
     if (route === "unread") return Response.json(await unread(me, only));
-    // Read-only, like /unread: the menubar's History tab. Never marks anything seen.
+    if (route === "conversations") {
+      const list = await conversations(me);
+      return Response.json({ you: me.handle, names: await namesFor(list.flatMap((c) => c.members)), conversations: list });
+    }
+    // Read-only, like /unread: the menubar's chat view. Never marks anything seen.
     const before = Number(url.searchParams.get("before"));
-    const [page, boards] = await Promise.all([history(me, { board: only, before: before > 0 ? before : undefined, limit: 30 }), boardsSeen(me)]);
-    const names = await namesFor(page.messages.flatMap((m) => [m.from, ...m.to]));
-    return Response.json({ you: me.handle, boards, names, ...page });
+    const conv = Number(url.searchParams.get("conversation"));
+    const conversation = conv > 0 ? conv : undefined;
+    const [page, boards] = await Promise.all([
+      history(me, { board: only, conversation, before: before > 0 ? before : undefined, limit: 30 }),
+      boardsSeen(me, conversation),
+    ]);
+    const ids = page.messages.map((m) => m.id);
+    const [names, fresh] = await Promise.all([
+      namesFor(page.messages.flatMap((m) => [m.from, ...m.to])),
+      ids.length ? sql<{ id: number }[]>`select message_id as id from inbox where user_id = ${me.id} and read_at is null and message_id in ${sql(ids)}` : [],
+    ]);
+    const unseen = new Set(fresh.map((r) => r.id));
+    return Response.json({ you: me.handle, boards, names, ...page, messages: page.messages.map((m) => (unseen.has(m.id) ? { ...m, unread: true } : m)) });
   }
   return new Response("Not found.\n", { status: 404 }); // incl. OAuth discovery probes: auth is by key, not OAuth
 }
