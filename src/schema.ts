@@ -69,4 +69,47 @@ create index if not exists keys_user on keys (user_id);
 alter table users alter column token_hash drop not null;
 insert into keys (token_hash, user_id, label) select token_hash, id, 'first sign-in' from users where token_hash is not null on conflict do nothing;
 update users set token_hash = null where token_hash is not null;
+
+-- Conversations: a one-to-one chat (no name, two members) or a group (named, or several people messaged together).
+-- Members see the whole history, including messages from before they joined.
+create table if not exists conversations (
+  id bigserial primary key,
+  name text, -- null = one-to-one, or people messaged together with post({to: [...]})
+  created_by bigint references users(id),
+  created_at timestamptz not null default now()
+);
+create table if not exists members (
+  conversation_id bigint not null references conversations(id),
+  user_id bigint not null references users(id),
+  joined_at timestamptz not null default now(),
+  primary key (conversation_id, user_id)
+);
+create index if not exists members_user on members (user_id);
+alter table messages add column if not exists conversation_id bigint references conversations(id);
+create index if not exists messages_conversation on messages (conversation_id, id);
+
+-- Older messages (and any an old deployment writes mid-rollout) get the conversation of their exact participant set.
+-- The lock keeps two cold-starting instances from creating the same conversation twice.
+do $$
+declare r record; cid bigint;
+begin
+  if not exists (select 1 from messages where conversation_id is null) then return; end if;
+  perform pg_advisory_xact_lock(1389);
+  for r in
+    select array_agg(m.id) as ids, min(m.created_at) as at, p.people
+    from messages m
+    cross join lateral (select array(select distinct u from unnest(m.from_id || array(select user_id from inbox where message_id = m.id)) u order by u) as people) p
+    where m.conversation_id is null
+    group by p.people
+  loop
+    select c.id into cid from conversations c
+    where c.name is null and array(select user_id from members where conversation_id = c.id order by user_id) = r.people
+    limit 1;
+    if cid is null then
+      insert into conversations (created_at) values (r.at) returning id into cid;
+      insert into members (conversation_id, user_id, joined_at) select cid, unnest(r.people), r.at;
+    end if;
+    update messages set conversation_id = cid where id = any(r.ids);
+  end loop;
+end $$;
 `;
