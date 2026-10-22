@@ -2,9 +2,10 @@ import { createHash, randomBytes, randomInt } from "node:crypto";
 import postgres from "postgres";
 import { SCHEMA } from "./schema.js";
 
-const DATABASE_URL = process.env.DATABASE_URL ?? process.env.POSTGRES_URL; // Neon's Vercel integration sets both
+const DATABASE_URL = process.env.DATABASE_URL ?? process.env.POSTGRES_URL;
 export const sql = postgres(DATABASE_URL!, {
-  prepare: false, // Supabase transaction pooler
+  max: 3, // per function instance; the smallest Cloud SQL tier allows ~25 connections in total
+  prepare: false,
   types: { bigint: { to: 20, from: [20], serialize: String, parse: Number } },
 });
 type Sql = typeof sql | postgres.TransactionSql;
