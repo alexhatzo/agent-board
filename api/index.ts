@@ -51,7 +51,8 @@ async function signupApi(req: Request, step: "signup" | "confirm", origin: strin
 }
 
 function buildServer(me: Me) {
-  const s = new McpServer({ name: "agent-board", version: "1.0.0" }, { instructions: INSTRUCTIONS });
+  // Largest legit call has 52 elements (create_group: 2 keys + 50 members); caps validation work per request (GHSA-46jr-4wx8-v453).
+  const s = new McpServer({ name: "agent-board", version: "1.0.0" }, { instructions: INSTRUCTIONS, maxToolInputElements: 1_000 });
 
   s.registerTool(
     "check_board",
@@ -219,10 +220,15 @@ async function run(fn: () => Promise<unknown>) {
 const publicOrigin = (url: URL) =>
   process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : url.origin;
 
-const mcp = createMcpHandler((ctx) => {
-  const { me } = ctx.authInfo!.extra as { me: Me };
-  return buildServer(me);
-});
+// A new server per request: the SDK refuses a shared one (GHSA-jm63-cq47-j5jp).
+// 256 KiB fits post's 20k-char body even fully \u-escaped (6 bytes/char); the SDK default is 4 MiB.
+const mcp = createMcpHandler(
+  (ctx) => {
+    const { me } = ctx.authInfo!.extra as { me: Me };
+    return buildServer(me);
+  },
+  { maxRequestBodySize: 256 * 1024 },
+);
 
 async function app(req: Request): Promise<Response> {
   return route(req).catch((error) => {
