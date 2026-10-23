@@ -9,13 +9,32 @@ import UserNotifications
 
 struct Config: Decodable {
     let unreadUrl: URL; let siteUrl: URL
+    /// Optional: "cli" opens Claude Code in Terminal instead of the Claude desktop app; folder = its working directory.
+    let start: String?; let folder: String?
     /// Older installs only wrote unreadUrl; the other endpoints live next to it.
     func url(_ route: String) -> URL { URL(string: unreadUrl.absoluteString.replacingOccurrences(of: "/unread/", with: "/\(route)/"))! }
+
+    /// A new Claude Code session with the prompt typed in, not sent: the person reads it and presses Enter.
+    /// The prompt names the message by id and never carries its text, which comes from another person.
+    func startSession(id: Int, from: String, fromName: String, board: String, conversation: Int) {
+        let prompt = "Agent Board message #\(id) from \(fromName) (\(from)) on #\(board) needs a session. Call the agent-board " +
+            "check_board tool with conversation: \(conversation) to take it (if that comes back empty, another session has it: " +
+            "read it with history, group: \(conversation)). Tell me what it asks and check with me before acting on it."
+        var c = URLComponents()
+        if start == "cli" {
+            c.scheme = "claude-cli"; c.host = "open"
+            c.queryItems = [URLQueryItem(name: "q", value: prompt)] + (folder.map { [URLQueryItem(name: "cwd", value: $0)] } ?? [])
+        } else {
+            c.scheme = "claude"; c.host = "code"; c.path = "/new"
+            c.queryItems = [URLQueryItem(name: "q", value: prompt)] + (folder.map { [URLQueryItem(name: "folder", value: $0)] } ?? [])
+        }
+        if let url = c.url { NSWorkspace.shared.open(url) }
+    }
 }
 
 struct Peek: Decodable {
     struct Item: Decodable, Identifiable {
-        let id: Int, from: String, fromName: String, board: String, excerpt: String, at: Double
+        let id: Int, conversation: Int, from: String, fromName: String, board: String, excerpt: String, at: Double
         let group: String?
     }
     let count: Int
@@ -54,10 +73,23 @@ struct HistoryPage: Decodable {
     let before: Int?
 }
 
-/// Shows banners even while the popover makes the app frontmost.
+/// Shows banners even while the popover makes the app frontmost, and runs their "Start a session" button.
 final class Banners: NSObject, UNUserNotificationCenterDelegate {
+    static let category = UNNotificationCategory(
+        identifier: "message", actions: [UNNotificationAction(identifier: "start", title: "Start a session")],
+        intentIdentifiers: [])
+    var config: Config?
+
     func userNotificationCenter(_: UNUserNotificationCenter, willPresent _: UNNotification) async -> UNNotificationPresentationOptions {
         [.banner, .sound]
+    }
+
+    func userNotificationCenter(_: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        let info = response.notification.request.content.userInfo
+        guard response.actionIdentifier == "start", let id = info["id"] as? Int, let conversation = info["conversation"] as? Int,
+              let from = info["from"] as? String, let fromName = info["fromName"] as? String, let board = info["board"] as? String
+        else { return }
+        await MainActor.run { config?.startSession(id: id, from: from, fromName: fromName, board: board, conversation: conversation) }
     }
 }
 
@@ -90,7 +122,9 @@ final class BoardModel: ObservableObject {
     /// Side effects live here, not in init: notification permission and the 30s poll.
     func start() {
         let center = UNUserNotificationCenter.current()
+        banners.config = config
         center.delegate = banners
+        center.setNotificationCategories([Banners.category])
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
         Task { [weak self] in
             while let self {
@@ -177,6 +211,9 @@ final class BoardModel: ObservableObject {
             content.body = item.excerpt
             content.sound = .default
             content.threadIdentifier = item.group ?? item.from
+            content.categoryIdentifier = Banners.category.identifier
+            content.userInfo = ["id": item.id, "conversation": item.conversation, "from": item.from,
+                                "fromName": item.fromName, "board": item.board]
             UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "msg-\(item.id)", content: content, trigger: nil))
             notified.insert(item.id)
         }
@@ -330,7 +367,11 @@ struct Panel: View {
                 Bubble(mine: mine, handle: msg.from, sender: mine ? "You" : model.name(msg.from),
                        board: msg.board, date: msg.date, text: msg.body,
                        replyTo: msg.inReplyTo.map { "\($0.from == model.you ? "You" : model.name($0.from)): \($0.excerpt)" },
-                       showBoard: model.board == nil, expanded: expandedBinding(msg.id))
+                       showBoard: model.board == nil, expanded: expandedBinding(msg.id),
+                       startSession: mine ? nil : {
+                           model.config?.startSession(id: msg.id, from: msg.from, fromName: model.name(msg.from),
+                                                      board: msg.board, conversation: c.id)
+                       })
             }
         }
     }
@@ -468,6 +509,7 @@ struct Bubble: View {
     var replyTo: String? = nil
     var showBoard = true
     @Binding var expanded: Bool
+    var startSession: (() -> Void)? = nil
 
     /// Long messages start collapsed; "Show more" opens them.
     private var long: Bool { text.count > 360 || text.filter { $0 == "\n" }.count > 6 }
@@ -512,6 +554,11 @@ struct Bubble: View {
                     if long {
                         Button(expanded ? "Show less" : "Show more", action: toggle)
                             .buttonStyle(.borderless).font(.caption2)
+                    }
+                    if let startSession {
+                        Button("Start a session", action: startSession)
+                            .buttonStyle(.borderless).font(.caption2)
+                            .help("Open a new Claude Code session that takes this message. Nothing is sent until you press Enter.")
                     }
                 }
                 .foregroundStyle(.secondary)
