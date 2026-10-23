@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomInt } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import postgres from "postgres";
 import { SCHEMA } from "./schema.js";
 
@@ -182,13 +182,13 @@ async function sendEmail(to: string, subject: string, text: string) {
 
 /** Claims up to PAGE unread messages. Each message is delivered to exactly one call per person,
  *  even when several sessions check at once (skip locked). */
-export async function checkBoard(me: Me, board?: string): Promise<Board> {
-  const onBoard = board ? sql`and m.board = ${board}` : sql``;
+export async function checkBoard(me: Me, board?: string, conversation?: number): Promise<Board> {
+  const only = sql`${board ? sql`and m.board = ${board}` : sql``} ${conversation ? sql`and m.conversation_id = ${conversation}` : sql``}`;
   const claimed = await sql<{ message_id: number }[]>`
     update inbox set read_at = now()
     where user_id = ${me.id} and message_id in (
       select i.message_id from inbox i join messages m on m.id = i.message_id
-      where i.user_id = ${me.id} and i.read_at is null ${onBoard}
+      where i.user_id = ${me.id} and i.read_at is null ${only}
       order by i.message_id limit ${PAGE}
       for update of i skip locked)
     returning message_id`;
@@ -197,7 +197,7 @@ export async function checkBoard(me: Me, board?: string): Promise<Board> {
     ids.length ? selectMessages(sql`m.id in ${sql(ids)}`, sql`order by m.id`) : [],
     sql<{ more: boolean }[]>`
       select exists(select 1 from inbox i join messages m on m.id = i.message_id
-                    where i.user_id = ${me.id} and i.read_at is null ${onBoard}) as more`,
+                    where i.user_id = ${me.id} and i.read_at is null ${only}) as more`,
     friendsAndRequests(me),
     myGroups(me),
     // ponytail: scans every visible message; add a per-user board summary table if this gets slow
@@ -272,6 +272,30 @@ export async function post(
       board, to: recipients.people.map((r) => r.handle).sort(),
     };
   });
+}
+
+/** A watch token answers one yes/no question ("has anyone else posted in conversation C after message A?") and holds
+ *  no key: it's signed with the hash of the key that posted, so revoking that key kills its watches. */
+const sign = (keyHash: string, payload: string) => createHmac("sha256", keyHash).update(payload).digest("base64url").slice(0, 22);
+
+export const watchToken = (me: Me, s: Sent) => {
+  const payload = `${me.id}.${s.conversation}.${s.id}`;
+  return `${payload}.${sign(me.keyHash, payload)}`;
+};
+
+/** undefined = bad token; otherwise whether a reply has landed. */
+export async function watch(token: string): Promise<boolean | undefined> {
+  const [user, conversation, after, sig] = token.split(".");
+  if (![user, conversation, after].every((n) => /^\d{1,15}$/.test(n ?? "")) || !sig) return undefined;
+  await migrate();
+  const payload = `${user}.${conversation}.${after}`;
+  const keys = await sql<{ token_hash: string }[]>`select token_hash from keys where user_id = ${Number(user)}`;
+  const ok = keys.some((k) => { const a = Buffer.from(sign(k.token_hash, payload)), b = Buffer.from(sig); return a.length === b.length && timingSafeEqual(a, b); });
+  if (!ok) return undefined;
+  const [{ reply }] = await sql<{ reply: boolean }[]>`
+    select exists(select 1 from inbox i join messages m on m.id = i.message_id
+                  where i.user_id = ${Number(user)} and m.conversation_id = ${Number(conversation)} and m.id > ${Number(after)}) as reply`;
+  return reply;
 }
 
 /** Everyone else in a conversation I'm in. A one-to-one chat also needs us to still be friends (remove_friend ends it);
