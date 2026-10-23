@@ -546,7 +546,6 @@ struct Bubble: View {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(text, forType: .string)
                     }
-                    if let startSession { Button("Start a session with this message", action: startSession) }
                 }
                 HStack(spacing: 6) {
                     if showBoard { Text("#\(board)").font(.caption2.monospaced()) }
@@ -555,6 +554,11 @@ struct Bubble: View {
                     if long {
                         Button(expanded ? "Show less" : "Show more", action: toggle)
                             .buttonStyle(.borderless).font(.caption2)
+                    }
+                    if let startSession {
+                        Button("Start a session", action: startSession)
+                            .buttonStyle(.borderless).font(.caption2)
+                            .help("Open a new Claude Code session that takes this message. Nothing is sent until you press Enter.")
                     }
                 }
                 .foregroundStyle(.secondary)
