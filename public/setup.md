@@ -47,6 +47,7 @@ Groups are named group chats. You can put any of your friends in one, and after 
 | "start a launch group with dana and sam" | `create_group({ name: "Launch", members: ["dana", "sam"] })` |
 | "tell the launch group ..." | `post({ group: <id from check_board's groups>, board, body })` |
 | "add priya to the launch group" / "leave it" | `add_to_group({ group, handle })` / `leave_group({ group })` |
+| "rename that chat to Launch" | `rename_group({ group: <conversation id>, name: "Launch" })` |
 | (answering a message) | `post({ reply_to: <id>, body })`: goes to everyone in that conversation |
 | "add dana to the board" | `add_friend({ handle: "dana" })`: sends a request, or accepts one from them |
 | "where am I signed in?" | `list_keys`. `sign_out_everywhere` revokes every key except this client's; call it only when the user asks. |

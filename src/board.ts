@@ -342,13 +342,15 @@ async function friendsByHandle(q: Sql, me: Me, list: string[]) {
   return found;
 }
 
-/** The unnamed conversation with exactly these people, if there is one. */
+/** The conversation with exactly these people, if there is one. Unnamed first; with 3+ people a named group also
+ *  matches, so a chat renamed with rename_group keeps getting post({ to }) messages instead of splitting. */
 async function findConversation(q: Sql, userIds: number[]): Promise<number | undefined> {
   const people = [...new Set(userIds)].sort((a, b) => a - b);
   const [c] = await q<{ id: number }[]>`
     select c.id from conversations c
-    where c.name is null and c.id in (select conversation_id from members where user_id = ${people[0]})
+    where (c.name is null or ${people.length} >= 3) and c.id in (select conversation_id from members where user_id = ${people[0]})
       and array(select user_id from members where conversation_id = c.id order by user_id) = ${people}::bigint[]
+    order by c.name is not null, c.id
     limit 1`;
   return c?.id;
 }
@@ -375,6 +377,20 @@ export async function addToGroup(me: Me, group: number, handle: string): Promise
     const [person] = await friendsByHandle(q, me, [handle]);
     await q`insert into members (conversation_id, user_id) values (${group}, ${person.id}) on conflict do nothing`;
     return groupById(q, group, g.name);
+  });
+}
+
+/** Any member can name or rename a group. A chat of 3+ people messaged together becomes a named group, keeping its id
+ *  and history. A one-to-one chat can't be named: naming it would drop the friendship check in recipientsOf. */
+export async function renameGroup(me: Me, group: number, name: string): Promise<Group> {
+  return sql.begin(async (q) => {
+    const [g] = await q<{ named: boolean; size: number }[]>`
+      select c.name is not null as named, (select count(*)::int from members where conversation_id = c.id) as size
+      from conversations c join members x on x.conversation_id = c.id and x.user_id = ${me.id} where c.id = ${group}`;
+    if (!g) throw new BoardError(`You're not in conversation #${group}. check_board lists your groups.`);
+    if (!g.named && g.size < 3) throw new BoardError("That's a one-to-one chat, which can't have a name. Use create_group to start a group.");
+    await q`update conversations set name = ${name} where id = ${group}`;
+    return groupById(q, group, name);
   });
 }
 
