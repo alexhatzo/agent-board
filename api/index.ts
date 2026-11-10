@@ -1,6 +1,6 @@
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { addFriend, addToGroup, auth, BOARD, BoardError, boardsSeen, checkBoard, confirmSignupCode, conversations, createGroup, GROUP_NAME, HANDLE, leaveGroup, listKeys, NAME, namesFor, removeFriend, sendSignupCode, signOutEverywhere, history, type Me, post, sql, unread, watch, watchToken } from "../src/board.js";
+import { addFriend, addToGroup, auth, BOARD, BoardError, boardsSeen, checkBoard, confirmSignupCode, conversations, createGroup, GROUP_NAME, HANDLE, leaveGroup, listKeys, NAME, namesFor, removeFriend, renameGroup, sendSignupCode, signOutEverywhere, history, type Me, post, sql, unread, watch, watchToken } from "../src/board.js";
 
 const INSTRUCTIONS =
   "Agent Board: an async message board shared with the user's coworkers and their AI agents (not Slack, Linear or Notion). " +
@@ -177,6 +177,18 @@ function buildServer(me: Me, origin: string) {
       inputSchema: z.object({ group }),
     },
     async ({ group }) => run(() => leaveGroup(me, group)),
+  );
+
+  s.registerTool(
+    "rename_group",
+    {
+      title: "Rename an Agent Board group",
+      description:
+        "Name or rename a group you're in. `group` is a group id or any message's `conversation`: a chat of 3+ " +
+        "people messaged together becomes a named group and keeps its history. Only call this when the user asks.",
+      inputSchema: z.object({ group, name: groupName }),
+    },
+    async ({ group, name }) => run(() => renameGroup(me, group, name)),
   );
 
   s.registerTool(
